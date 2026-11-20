@@ -2,20 +2,28 @@
  * The `users` resource, composed from the level-2 building blocks.
  *
  *   User (Model)  ──► UserQuery  (signals schema + SQL where/order)
- *                 ──► UserRepo   (makeRepository + list + live + reactivity)
+ *                 ──► UserRepo   (makeRepository + list + reactivity)
  *                 ──► form fields / draft / errors schemas
  *                 ──► endpoints  (route + typed `@verb(...)` call)
  *                 ──► views      (generic components)
+ *
+ * Relation: `teamId -> teams`. Team options come from `TeamLookup`, and the live
+ * view listens to both `users` and `teams`, so renaming a team re-renders the
+ * table and the team selects in every open tab.
  */
 import { Context, Effect, Layer, Schema, Stream } from "effect"
 import { HttpRouter } from "effect/http"
+import { Reactivity } from "effect/reactivity"
 import * as Components from "../crud/components.tsx"
+import { toast, unexpected } from "../crud/Feedback.tsx"
 import * as Form from "../crud/Form.ts"
+import * as Lookup from "../crud/Lookup.ts"
 import * as Query from "../crud/Query.ts"
 import * as Repo from "../crud/Repo.ts"
 import * as ds from "../datastar/Attrs.ts"
 import * as Datastar from "../datastar/Datastar.ts"
 import * as Endpoint from "../datastar/Endpoint.ts"
+import { TeamLookup } from "./Teams.tsx"
 import { User, UserId } from "./User.ts"
 
 // ---------------------------------------------------------------------------
@@ -24,17 +32,16 @@ import { User, UserId } from "./User.ts"
 
 export const UserQuery = Query.make(User, {
   sortable: ["name", "email", "role", "createdAt"],
-  filters: { name: "contains", email: "contains", role: "eq", active: "eq" },
+  filters: { name: "contains", email: "contains", role: "eq", teamId: "eq", active: "eq" },
   defaultSort: ["createdAt", "desc"],
   pageSizes: [10, 25, 50]
 })
 
 const formFields = Form.fields(User.jsonCreate)
 const formKeys = formFields.map((f) => f.key) as Array<keyof typeof User.jsonCreate.fields>
-const columns: ReadonlyArray<Components.Column<User>> = Form.fields(User).filter((f) => f.key !== "id").map((field) => ({
-  field,
-  sortable: (UserQuery.sortable as ReadonlyArray<string>).includes(field.key)
-}))
+const tableFields = Form.fields(User).filter((f) => f.key !== "id")
+/** Fields whose options come from a lookup rather than the schema. */
+const relationKeys = ["teamId"] as const
 
 export const UserSignals = ds.make(Schema.Struct({
   users: Schema.Struct({
@@ -44,16 +51,10 @@ export const UserSignals = ds.make(Schema.Struct({
     dialog: Schema.Boolean
   })
 }))
-
 const sig = UserSignals
-const initialSignals: typeof UserSignals.schema.Type = {
-  users: {
-    query: UserQuery.initial,
-    draft: Form.blankDraft(User.jsonCreate),
-    errors: Form.noErrors(formKeys),
-    dialog: false
-  }
-}
+
+const blankDraft = Form.blankDraft(User.jsonCreate)
+const noErrors = Form.noErrors(formKeys)
 
 // Each endpoint decodes only the slice of signals it needs.
 const QuerySignals = Schema.Struct({ users: Schema.Struct({ query: UserQuery.schema }) })
@@ -70,47 +71,43 @@ export class UserRepo extends Context.Service<UserRepo, Effect.Success<typeof ma
 export const UserRepoLive = Layer.effect(UserRepo, makeRepo)
 
 // ---------------------------------------------------------------------------
-// UI patches (shared by handlers)
-// ---------------------------------------------------------------------------
-
-const toast = (message: string, kind: "ok" | "error" = "ok") =>
-  Datastar.patchElements(<div id="toast" class={["toast", kind]} safe>{message}</div>)
-
-const closeDialog = Datastar.patchSignals({
-  users: { dialog: false, draft: Form.blankDraft(User.jsonCreate), errors: Form.noErrors(formKeys) }
-})
-
-/** Map a failed draft decode / constraint violation onto per-field errors. */
-const fieldErrors = (errors: Partial<Record<string, string>>) =>
-  Datastar.patchSignals({ users: { errors: { ...Form.noErrors(formKeys), ...errors } } })
-
-const unexpected = (error: { readonly _tag: string; readonly message?: string }) =>
-  Effect.logError("unexpected failure", error).pipe(
-    Effect.as(toast(`Something went wrong (${error._tag})`, "error"))
-  )
-
-// ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
 
+const closeDialog = Datastar.patchSignals({ users: { dialog: false, draft: blankDraft, errors: noErrors } })
+const fieldErrors = (errors: Partial<Record<string, string>>) =>
+  Datastar.patchSignals({ users: { errors: { ...noErrors, ...errors } } })
+
 /**
- * Live view. Long-lived SSE stream: re-renders the table whenever the `users`
- * table is mutated (by anyone). When the query signals change, the browser
- * re-issues this request and Datastar aborts the previous stream.
+ * Live view. Long-lived SSE stream that re-runs when `users` OR `teams` change.
+ * Selects whose options come from the team lookup are replaced only when the
+ * options actually changed (and on the first emission, since the page shell
+ * is rendered without them).
  */
 const view = Endpoint.make(
   "GET",
   "/users/view",
   Stream.unwrap(Effect.gen(function*() {
     const repo = yield* UserRepo
+    const teams = yield* TeamLookup
+    const reactivity = yield* Reactivity.Reactivity
     const { users: { query } } = yield* Datastar.signals(QuerySignals)
-    return repo.live(query).pipe(
-      Stream.map((page) =>
-        page.page > page.pages
+    let lastOptions: string | undefined
+    return reactivity.stream(["users", teams.table], Effect.all([repo.list(query), teams.options])).pipe(
+      Stream.map(([page, teamOptions]): Datastar.Events => {
+        if (page.page > page.pages) {
           // Out of range (e.g. after deleting the last row on the last page): clamp.
-          ? Datastar.patchSignals({ users: { query: { page: page.pages } } })
-          : Datastar.patchElements(<UserTable page={page} query={query} />)
-      )
+          return Datastar.patchSignals({ users: { query: { page: page.pages } } })
+        }
+        const lookups: Components.Lookups = { teamId: teamOptions }
+        const events = [Datastar.patchElements(<UserTable page={page} query={query} lookups={lookups} />)]
+        const key = JSON.stringify(teamOptions)
+        if (key !== lastOptions) {
+          lastOptions = key
+          events.push(...relationSelects(lookups))
+        }
+        return events
+      })
     )
   })).pipe(
     Stream.catch((error) => Stream.fromEffect(unexpected(error)))
@@ -118,47 +115,35 @@ const view = Endpoint.make(
   { include: [sig.path("users.query")] }
 )
 
-const create = Endpoint.make(
-  "POST",
-  "/users",
+const save = (id?: UserId) =>
   Effect.gen(function*() {
     const repo = yield* UserRepo
     const { users: { draft } } = yield* Datastar.signals(DraftSignals)
-    const input = yield* Schema.decodeUnknownEffect(User.jsonCreate)(draft, { errors: "all" })
-    const user = yield* repo.insert(User.insert.make(input))
-    return [closeDialog, toast(`Created ${user.name}`)]
+    const user = id === undefined
+      ? yield* repo.insert(User.insert.make(yield* Form.decode(User.jsonCreate, draft)))
+      : yield* repo.update(User.update.make({ ...(yield* Form.decode(User.jsonUpdate, draft)), id }))
+    return [closeDialog, toast(`${id === undefined ? "Created" : "Saved"} ${user.name}`)]
   }).pipe(
     Effect.catchTags({
       SchemaError: (e) => Effect.succeed(fieldErrors(Form.errors(formKeys, e))),
       SqlError: (e) =>
-        e.reason._tag === "UniqueViolation" || e.reason._tag === "ConstraintError"
+        e.reason._tag === "UniqueViolation"
           ? Effect.succeed(fieldErrors({ email: "Email is already taken" }))
+          : e.reason._tag === "ConstraintError"
+          // FK violation: the chosen team was deleted while the dialog was open.
+          ? Effect.succeed(fieldErrors({ teamId: "That team no longer exists" }))
           : unexpected(e),
       SignalsError: unexpected
     })
-  ),
-  { include: [sig.path("users.draft")] }
-)
+  )
+
+const create = Endpoint.make("POST", "/users", save(), { include: [sig.path("users.draft")] })
 
 const update = Endpoint.make(
   "PUT",
   "/users/:id",
-  Effect.gen(function*() {
-    const repo = yield* UserRepo
-    const { id } = yield* HttpRouter.schemaPathParams(IdParams)
-    const { users: { draft } } = yield* Datastar.signals(DraftSignals)
-    const input = yield* Schema.decodeUnknownEffect(User.jsonUpdate)(draft, { errors: "all" })
-    const user = yield* repo.update(User.update.make({ ...input, id }))
-    return [closeDialog, toast(`Saved ${user.name}`)]
-  }).pipe(
-    Effect.catchTags({
-      SchemaError: (e) => Effect.succeed(fieldErrors(Form.errors(formKeys, e))),
-      SqlError: (e) =>
-        e.reason._tag === "UniqueViolation" || e.reason._tag === "ConstraintError"
-          ? Effect.succeed(fieldErrors({ email: "Email is already taken" }))
-          : unexpected(e),
-      SignalsError: unexpected
-    })
+  Effect.flatMap(HttpRouter.schemaPathParams(IdParams), ({ id }) => save(id)).pipe(
+    Effect.catchTag("SchemaError", unexpected)
   ),
   { include: [sig.path("users.draft")] }
 )
@@ -171,9 +156,8 @@ const edit = Endpoint.make(
     const repo = yield* UserRepo
     const { id } = yield* HttpRouter.schemaPathParams(IdParams)
     const user = yield* repo.findById(id)
-    const draft = Schema.encodeSync(User.jsonUpdate)(user)
     return Datastar.patchSignals({
-      users: { dialog: true, draft: { ...draft, id: user.id }, errors: Form.noErrors(formKeys) }
+      users: { dialog: true, draft: Form.toDraft(User.jsonUpdate, user, user.id), errors: noErrors }
     })
   }).pipe(
     Effect.catchTags({
@@ -205,11 +189,57 @@ export const UserRoutes = HttpRouter.addAll([view.route, create.route, update.ro
 // Views
 // ---------------------------------------------------------------------------
 
-const UserTable = (props: { readonly page: Repo.Page<User>; readonly query: typeof UserQuery.initial }) => (
+const columnsFor = (lookups: Components.Lookups): ReadonlyArray<Components.Column<User>> => {
+  const teamNames = Lookup.labels(lookups["teamId"] ?? [])
+  return tableFields.map((field) => ({
+    field,
+    sortable: (UserQuery.sortable as ReadonlyArray<string>).includes(field.key),
+    render: field.key === "teamId"
+      ? (u: User) => <span safe>{u.teamId === null ? "—" : teamNames.get(String(u.teamId)) ?? "?"}</span>
+      : undefined
+  }))
+}
+
+/** `mode: "replace"` gives a fresh element, so `data-bind` re-applies the current signal value. */
+const relationSelects = (lookups: Components.Lookups): Array<Datastar.DatastarEvent> =>
+  relationKeys.flatMap((key) => {
+    const filter = UserQuery.filters.find((f) => f.key === key)
+    const field = formFields.find((f) => f.key === key)
+    return [
+      ...(filter
+        ? [
+          Datastar.patchElements(
+            <Components.FilterSelect prefix="users" filter={filter} query={sig.path("users.query")} lookup={lookups[key]} />,
+            { selector: `#${Components.filterId("users", key)}`, mode: "replace" }
+          )
+        ]
+        : []),
+      ...(field
+        ? [
+          Datastar.patchElements(
+            <Components.FieldSelect
+              prefix="users"
+              field={field}
+              draft={sig.path("users.draft")}
+              errors={sig.path("users.errors")}
+              lookup={lookups[key]}
+            />,
+            { selector: `#${Components.fieldId("users", key)}`, mode: "replace" }
+          )
+        ]
+        : [])
+    ]
+  })
+
+const UserTable = (props: {
+  readonly page: Repo.Page<User>
+  readonly query: typeof UserQuery.initial
+  readonly lookups: Components.Lookups
+}) => (
   <section id="users-table">
     <Components.Table
       id="users-rows"
-      columns={columns}
+      columns={columnsFor(props.lookups)}
       rows={props.page.rows}
       rowId={(u) => `user-${u.id}`}
       query={sig.path("users.query")}
@@ -236,47 +266,25 @@ const UserTable = (props: { readonly page: Repo.Page<User>; readonly query: type
   </section>
 )
 
-const UserDialog = () => {
-  const id = sig.$("users.draft.id")
-  return (
-    <dialog
-      id="user-dialog"
-      {...ds.merge(
-        ds.attr("open", sig.$("users.dialog")),
-        ds.on("keydown", `evt.key === 'Escape' && (${sig.$("users.dialog")} = false)`)
-      )}
-    >
-      <form novalidate {...ds.on("submit", `${id} ? ${update.call({ id: Endpoint.js(id) })} : ${create.call()}`, { prevent: true })}>
-        <h2 {...ds.text(`${id} ? 'Edit user' : 'New user'`)} />
-        {formFields.map((field) => (
-          <Components.FormField field={field} draft={sig.path("users.draft")} errors={sig.path("users.errors")} />
-        ))}
-        <footer>
-          <button type="button" class="secondary" {...ds.on("click", `${sig.$("users.dialog")} = false`)}>Cancel</button>
-          <button type="submit">Save</button>
-        </footer>
-      </form>
-    </dialog>
-  )
-}
-
-/** Full page body. Initial table content arrives over the live stream. */
+/** Page shell. Table content and team options arrive over the live stream. */
 export const UsersPage = () => (
-  <main {...sig.init(initialSignals)}>
+  <main
+    {...sig.init({ users: { query: UserQuery.initial, draft: blankDraft, errors: noErrors, dialog: false } })}
+  >
     <header class="bar">
       <h1>Users</h1>
       <button
         {...ds.on(
           "click",
-          `${sig.$("users.draft")} = ${JSON.stringify(Form.blankDraft(User.jsonCreate))}; ${sig.$("users.errors")} = ${
-            JSON.stringify(Form.noErrors(formKeys))
+          `${sig.$("users.draft")} = ${JSON.stringify(blankDraft)}; ${sig.$("users.errors")} = ${
+            JSON.stringify(noErrors)
           }; ${sig.$("users.dialog")} = true`
         )}
       >
         New user
       </button>
     </header>
-    <Components.FilterBar filters={UserQuery.filters} query={sig.path("users.query")} />
+    <Components.FilterBar prefix="users" filters={UserQuery.filters} query={sig.path("users.query")} />
     <div
       id="users-live"
       {...ds.merge(
@@ -286,7 +294,15 @@ export const UsersPage = () => (
     >
       <section id="users-table" aria-busy="true">Loading…</section>
     </div>
-    <UserDialog />
-    <div id="toast" />
+    <Components.FormDialog
+      prefix="users"
+      noun="user"
+      fields={formFields}
+      draft={sig.path("users.draft")}
+      errors={sig.path("users.errors")}
+      open={sig.path("users.dialog")}
+      submit={`${sig.$("users.draft.id")} ? ${update.call({ id: Endpoint.js(sig.$("users.draft.id")) })} : ${create.call()}`}
+    />
+    <Components.Toast />
   </main>
 )

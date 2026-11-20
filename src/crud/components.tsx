@@ -8,46 +8,78 @@ import { DateTime } from "effect"
 import * as ds from "../datastar/Attrs.ts"
 import type { SignalPath } from "../datastar/Attrs.ts"
 import type * as Field from "./Field.ts"
-import type { FilterInfo } from "./Query.ts"
+import type { Option } from "./Lookup.ts"
+import { NULL, type FilterInfo } from "./Query.ts"
 
 const at = (base: SignalPath, ...rest: Array<string>) => [base, ...rest].join(".") as SignalPath
 const ref = (path: SignalPath) => `$${path}`
 const str = (s: string) => `'${s.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
 
+/**
+ * Options for a field: from a lookup (relations) when given, otherwise derived
+ * from the schema (enum members / yes-no).
+ */
+const fieldOptions = (field: Field.FieldInfo, lookup?: ReadonlyArray<Option>): ReadonlyArray<Option> =>
+  lookup ?? (field.kind === "boolean"
+    ? [{ value: "true", label: "Yes" }, { value: "false", label: "No" }]
+    : field.options.map((o) => ({ value: o, label: o })))
+
+/** Lookup options per field key, for relation fields. */
+export type Lookups = Readonly<Record<string, ReadonlyArray<Option>>>
+
+/** Stable DOM ids, so live views can re-render selects whose options come from lookups. */
+export const filterId = (prefix: string, key: string) => `${prefix}-filter-${key}`
+export const fieldId = (prefix: string, key: string) => `${prefix}-field-${key}`
+
 // ---------------------------------------------------------------------------
 // Filters
 // ---------------------------------------------------------------------------
 
-export const FilterBar = (props: { readonly filters: ReadonlyArray<FilterInfo>; readonly query: SignalPath }) => {
-  const resetPage = `${ref(at(props.query, "page"))} = 1`
+export const FilterSelect = (props: {
+  readonly prefix: string
+  readonly filter: FilterInfo
+  readonly query: SignalPath
+  readonly lookup?: ReadonlyArray<Option> | undefined
+}) => {
+  const f = props.filter
   return (
-    <div class="filters">
-      {props.filters.map((f) => {
-        const bound = ds.merge(ds.bind(at(props.query, "filters", f.key)), ds.on("input", resetPage))
-        if (f.operator === "contains") {
-          return (
-            <label>
-              <span safe>{f.label}</span>
-              <input type="search" placeholder={`Search ${f.label.toLowerCase()}…`} {...bound} />
-            </label>
-          )
-        }
-        const options = f.kind === "boolean"
-          ? [["true", "Yes"], ["false", "No"]] as const
-          : f.options.map((o) => [o, o] as const)
-        return (
-          <label>
-            <span safe>{f.label}</span>
-            <select {...bound}>
-              <option value="">All</option>
-              {options.map(([value, label]) => <option value={value} safe>{label}</option>)}
-            </select>
-          </label>
-        )
-      })}
-    </div>
+    <select
+      id={filterId(props.prefix, f.key)}
+      {...ds.merge(ds.bind(at(props.query, "filters", f.key)), ds.on("change", `${ref(at(props.query, "page"))} = 1`))}
+    >
+      <option value="">All</option>
+      {f.nullable ? <option value={NULL}>None</option> : ""}
+      {fieldOptions(f, props.lookup).map((o) => <option value={o.value} safe>{o.label}</option>)}
+    </select>
   )
 }
+
+export const FilterBar = (props: {
+  readonly prefix: string
+  readonly filters: ReadonlyArray<FilterInfo>
+  readonly query: SignalPath
+  readonly lookups?: Lookups | undefined
+}) => (
+  <div class="filters">
+    {props.filters.map((f) => (
+      <label>
+        <span safe>{f.label}</span>
+        {f.operator === "contains"
+          ? (
+            <input
+              type="search"
+              placeholder={`Search ${f.label.toLowerCase()}…`}
+              {...ds.merge(
+                ds.bind(at(props.query, "filters", f.key)),
+                ds.on("input", `${ref(at(props.query, "page"))} = 1`)
+              )}
+            />
+          )
+          : <FilterSelect prefix={props.prefix} filter={f} query={props.query} lookup={props.lookups?.[f.key]} />}
+      </label>
+    ))}
+  </div>
+)
 
 // ---------------------------------------------------------------------------
 // Table
@@ -167,28 +199,43 @@ export const Pagination = (props: {
 // Form
 // ---------------------------------------------------------------------------
 
-export const FormField = (props: { readonly field: Field.FieldInfo; readonly draft: SignalPath; readonly errors: SignalPath }) => {
+interface FieldProps {
+  readonly prefix: string
+  readonly field: Field.FieldInfo
+  readonly draft: SignalPath
+  readonly errors: SignalPath
+  readonly lookup?: ReadonlyArray<Option> | undefined
+}
+
+const invalidAttr = (props: FieldProps) =>
+  ds.attr("aria-invalid", `${ref(at(props.errors, props.field.key))} ? 'true' : 'false'`)
+
+export const FieldSelect = (props: FieldProps) => (
+  <select
+    id={fieldId(props.prefix, props.field.key)}
+    {...ds.merge(ds.bind(at(props.draft, props.field.key)), invalidAttr(props))}
+  >
+    {props.field.nullable ? <option value="">—</option> : ""}
+    {fieldOptions(props.field, props.lookup).map((o) => <option value={o.value} safe>{o.label}</option>)}
+  </select>
+)
+
+export const FormField = (props: FieldProps) => {
   const f = props.field
   const bind = ds.bind(at(props.draft, f.key))
   const error = ref(at(props.errors, f.key))
-  const invalid = ds.attr("aria-invalid", `${error} ? 'true' : 'false'`)
   const input = (() => {
     switch (f.widget) {
       case "checkbox":
         return <input type="checkbox" {...bind} />
       case "select":
-        return (
-          <select {...ds.merge(bind, invalid)}>
-            {f.nullable ? <option value="">—</option> : ""}
-            {f.options.map((o) => <option value={o} safe>{o}</option>)}
-          </select>
-        )
+        return <FieldSelect {...props} />
       case "textarea":
-        return <textarea {...ds.merge(bind, invalid)} />
+        return <textarea {...ds.merge(bind, invalidAttr(props))} />
       case "readonly":
         return <input disabled {...bind} />
       default:
-        return <input type={f.widget} {...ds.merge(bind, invalid)} />
+        return <input type={f.widget} {...ds.merge(bind, invalidAttr(props))} />
     }
   })()
   return (
@@ -199,3 +246,52 @@ export const FormField = (props: { readonly field: Field.FieldInfo; readonly dra
     </label>
   )
 }
+
+// ---------------------------------------------------------------------------
+// Dialog + toast
+// ---------------------------------------------------------------------------
+
+/**
+ * Create/edit dialog for a draft. `submit` is the Datastar expression to run
+ * (typically `$draft.id ? update : create`).
+ */
+export const FormDialog = (props: {
+  readonly prefix: string
+  readonly noun: string
+  readonly fields: ReadonlyArray<Field.FieldInfo>
+  readonly draft: SignalPath
+  readonly errors: SignalPath
+  readonly open: SignalPath
+  readonly submit: ds.Expr
+  readonly lookups?: Lookups | undefined
+}) => {
+  const open = ref(props.open)
+  return (
+    <dialog
+      id={`${props.prefix}-dialog`}
+      {...ds.merge(ds.attr("open", open), ds.on("keydown", `evt.key === 'Escape' && (${open} = false)`))}
+    >
+      <form novalidate {...ds.on("submit", props.submit, { prevent: true })}>
+        <h2 {...ds.text(`${ref(at(props.draft, "id"))} ? ${str(`Edit ${props.noun}`)} : ${str(`New ${props.noun}`)}`)} />
+        {props.fields.map((field) => (
+          <FormField
+            prefix={props.prefix}
+            field={field}
+            draft={props.draft}
+            errors={props.errors}
+            lookup={props.lookups?.[field.key]}
+          />
+        ))}
+        <footer>
+          <button type="button" class="secondary" {...ds.on("click", `${open} = false`)}>Cancel</button>
+          <button type="submit">Save</button>
+        </footer>
+      </form>
+    </dialog>
+  )
+}
+
+export const Toast = (props: { readonly message?: string; readonly kind?: "ok" | "error" }) =>
+  props.message === undefined
+    ? <div id="toast" />
+    : <div id="toast" class={["toast", props.kind ?? "ok"]} safe>{props.message}</div>

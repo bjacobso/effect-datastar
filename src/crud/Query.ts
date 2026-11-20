@@ -59,15 +59,21 @@ type SqlHelpers = Statement.Constructor
 const escapeLike = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`)
 
 /** Schema for the raw filter string, validated against the field's own type. */
+/** Filter value meaning `IS NULL` (for nullable fields, e.g. "no team"). */
+export const NULL = "null"
+
 const filterSchema = (field: Field.FieldInfo, op: Operator): Schema.Codec<string, string> => {
   if (op === "contains") return Schema.String
+  const nulls = field.nullable ? [NULL] : []
   switch (field.kind) {
     case "enum":
-      return Schema.Literals(["", ...field.options]) as any
+      return Schema.Literals(["", ...nulls, ...field.options]) as any
     case "boolean":
-      return Schema.Literals(["", "true", "false"]) as any
+      return Schema.Literals(["", ...nulls, "true", "false"]) as any
     case "number":
-      return Schema.String.check(Schema.isPattern(/^(-?\d+(\.\d+)?)?$/))
+      return Schema.String.check(
+        Schema.isPattern(field.nullable ? /^(-?\d+(\.\d+)?|null)?$/ : /^(-?\d+(\.\d+)?)?$/)
+      )
     default:
       return Schema.String
   }
@@ -123,6 +129,8 @@ export const make = <
         clauses.push(
           f.operator === "contains"
             ? sql`${sql(f.key)} LIKE ${`%${escapeLike(raw)}%`} ESCAPE '\\'`
+            : f.nullable && raw === NULL
+            ? sql`${sql(f.key)} IS NULL`
             : sql`${sql(f.key)} = ${toDbValue(f, raw) as any}`
         )
       }

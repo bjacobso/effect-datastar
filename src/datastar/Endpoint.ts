@@ -46,7 +46,7 @@ export interface Endpoint<P extends string, R> {
 export const make = <const P extends HttpRouter.PathInput, R>(
   method: Method,
   path: P,
-  handler: Effect.Effect<Datastar.Events, never, R> | Stream.Stream<Datastar.DatastarEvent, never, R>,
+  handler: Effect.Effect<Datastar.Events, never, R> | Stream.Stream<Datastar.Events, never, R>,
   options?: { readonly include?: ReadonlyArray<SignalPath> }
 ): Endpoint<P, Exclude<R, HttpRouter.Provided>> => {
   const call = (params?: Record<string, Param>, callOptions?: CallOptions): Expr => {

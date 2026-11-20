@@ -81,13 +81,15 @@ export type Events = DatastarEvent | ReadonlyArray<DatastarEvent>
  * Serve an Effect (one-shot) or Stream (long-lived) of Datastar events as SSE.
  * The error channel must be `never`: map failures to patches first.
  */
+const toArray = (e: Events): ReadonlyArray<DatastarEvent> => (Array.isArray(e) ? e : [e as DatastarEvent])
+
 export const respond = <R>(
-  events: Effect.Effect<Events, never, R> | Stream.Stream<DatastarEvent, never, R>
+  events: Effect.Effect<Events, never, R> | Stream.Stream<Events, never, R>
 ): Effect.Effect<HttpServerResponse.HttpServerResponse, never, R> =>
   Effect.map(Effect.context<R>(), (context) => {
     const stream: Stream.Stream<DatastarEvent, never, R> = Stream.isStream(events)
-      ? events
-      : Stream.fromIterableEffect(Effect.map(events, (e) => (Array.isArray(e) ? e : [e as DatastarEvent])))
+      ? Stream.flattenIterable(Stream.map(events, toArray))
+      : Stream.fromIterableEffect(Effect.map(events, toArray))
     return HttpServerResponse.stream(
       stream.pipe(
         Stream.mapEffect(encodeEvent),

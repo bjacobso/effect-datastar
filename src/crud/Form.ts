@@ -4,7 +4,7 @@
  *   - `empty(fields)`   : an all-blank draft for the signals
  *   - `errors(error)`   : SchemaError -> `{ [field]: message }` for patching into signals
  */
-import { Schema, SchemaIssue } from "effect"
+import { Effect, Schema, SchemaIssue } from "effect"
 import * as Field from "./Field.ts"
 
 export type Errors<K extends string> = { readonly [P in K]: string }
@@ -62,3 +62,45 @@ export const blankDraft = <F extends Schema.Struct.Fields>(struct: { readonly fi
   id: "" as unknown,
   ...(Object.fromEntries(fields(struct).map((f) => [f.key, blank(f)])) as { readonly [K in keyof F]: unknown })
 })
+
+// ---------------------------------------------------------------------------
+// Draft <-> model value
+//
+// Inputs and selects produce strings, and Datastar signals can't hold `null`
+// (merge-patch semantics delete them). So drafts use `""` for "nothing" and
+// strings for select values; these two functions translate at the boundary,
+// driven by field metadata.
+// ---------------------------------------------------------------------------
+
+const fromInput = (field: Field.FieldInfo, value: unknown): unknown => {
+  if (typeof value !== "string") return value
+  if (value === "" && field.nullable) return null
+  if (field.kind === "number" && value.trim() !== "" && !Number.isNaN(Number(value))) return Number(value)
+  return value
+}
+
+/** Decode a draft with a create/update schema, coercing input strings per field first. */
+export const decode = <S extends Schema.Codec<any, any, never, never> & { readonly fields: Schema.Struct.Fields }>(
+  schema: S,
+  draft: Record<string, unknown>
+): Effect.Effect<S["Type"], Schema.SchemaError> => {
+  const coerced = Object.fromEntries(
+    fields(schema).map((f) => [f.key, fromInput(f, draft[f.key])])
+  )
+  return Schema.decodeUnknownEffect(schema)(coerced, { errors: "all" })
+}
+
+/** Encode a model value into a draft the form can bind to. */
+export const toDraft = <S extends Schema.Codec<any, any, never, never> & { readonly fields: Schema.Struct.Fields }>(
+  schema: S,
+  value: S["Type"],
+  id: unknown
+): Record<string, unknown> => {
+  const encoded = Schema.encodeSync(schema)(value) as Record<string, unknown>
+  const draft: Record<string, unknown> = { id }
+  for (const f of fields(schema)) {
+    const v = encoded[f.key]
+    draft[f.key] = v === null || v === undefined ? "" : f.widget === "select" && typeof v === "number" ? String(v) : v
+  }
+  return draft
+}

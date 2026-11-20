@@ -1,4 +1,4 @@
-export const Layout = (props: { readonly title: string; readonly children: JSX.Element }) => (
+export const Layout = (props: { readonly title: string; readonly active: string; readonly children: JSX.Element }) => (
   <>
     {"<!doctype html>"}
     <html lang="en">
@@ -9,7 +9,14 @@ export const Layout = (props: { readonly title: string; readonly children: JSX.E
         <link rel="stylesheet" href="/app.css" />
         <script type="module" src="/datastar.js"></script>
       </head>
-      <body>{props.children}</body>
+      <body>
+        <nav class="top">
+          {[["/users", "Users"], ["/teams", "Teams"]].map(([href, label]) => (
+            <a href={href} class={props.active === href ? "active" : undefined}>{label}</a>
+          ))}
+        </nav>
+        {props.children}
+      </body>
     </html>
   </>
 )

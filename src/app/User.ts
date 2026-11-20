@@ -1,5 +1,6 @@
 import { Schema } from "effect"
 import { Model } from "effect/schema"
+import { TeamId } from "./Team.ts"
 
 export const UserId = Schema.Int.pipe(Schema.brand("UserId"))
 export type UserId = typeof UserId.Type
@@ -25,6 +26,8 @@ export class User extends Model.Class<User>("User")({
   name: Name,
   email: Email,
   role: Role.annotate({ title: "Role" }),
+  // Relation: nullable foreign key to `teams`. Options come from a lookup at render time.
+  teamId: Schema.NullOr(TeamId).annotate({ title: "Team", widget: "select" }),
   active: Model.BooleanSqlite,
   createdAt: Model.DateTimeInsert
 }) {}
