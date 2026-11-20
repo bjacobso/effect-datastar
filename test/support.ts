@@ -152,4 +152,4 @@ export const userDraft = (draft: Record<string, unknown>) => ({
 
 /** Text of the rows in a rendered table. */
 export const rowNames = (html: string) =>
-  [...html.matchAll(/<tr id="(?:user|team)-\d+"><td>(?:<span>)?([^<]*)/g)].map((m) => m[1])
+  [...html.matchAll(/<tr id="(?:users|teams)-\d+"><td>(?:<span>)?([^<]*)/g)].map((m) => m[1])

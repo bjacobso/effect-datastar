@@ -2,7 +2,9 @@ import { SqliteClient } from "@effect/sql-sqlite-node"
 import { describe, expect, it, layer } from "@effect/vitest"
 import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/sql"
-import { UserQuery } from "../src/app/Users.tsx"
+import { Users } from "../src/app/Users.tsx"
+
+const UserQuery = Users.query
 
 const decode = Schema.decodeUnknownExit(UserQuery.schema)
 const query = (overrides: Record<string, unknown> = {}, filters: Record<string, string> = {}) => ({
