@@ -69,13 +69,13 @@ const seed = Effect.gen(function*() {
   }
 })
 
-export const DbLive = Layer.effectDiscard(
-  Effect.gen(function*() {
+/** SQLite + migrations + seed. Use `":memory:"` for tests. */
+export const layer = (options: { readonly filename: string; readonly seed?: boolean }) =>
+  Layer.effectDiscard(Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     // SQLite only enforces foreign keys when asked, per connection.
     yield* sql`PRAGMA foreign_keys = ON`
     const ran = yield* SqliteMigrator.run({ loader: migrations })
     for (const [id, name] of ran) yield* Effect.logInfo(`Migrated ${id}_${name}`)
-    yield* seed
-  })
-).pipe(Layer.provideMerge(SqliteClient.layer({ filename: "app.db" })))
+    if (options.seed ?? true) yield* seed
+  })).pipe(Layer.provideMerge(SqliteClient.layer({ filename: options.filename })))

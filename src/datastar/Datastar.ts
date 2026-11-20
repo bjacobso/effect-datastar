@@ -51,7 +51,8 @@ export const patchSignals = (signals: unknown, options?: { readonly onlyIfMissin
 
 const dataLines = (prefix: string, value: string) => value.split("\n").map((line) => `data: ${prefix} ${line}\n`)
 
-const encodeEvent = (event: DatastarEvent): Effect.Effect<string> =>
+/** Encode one event in the Datastar SSE wire format. */
+export const encodeEvent = (event: DatastarEvent): Effect.Effect<string> =>
   Effect.gen(function*() {
     switch (event._tag) {
       case "PatchElements": {
