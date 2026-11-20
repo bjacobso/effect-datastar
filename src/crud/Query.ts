@@ -51,6 +51,13 @@ export interface QueryDef<Sortable extends string, FilterKey extends string> {
   readonly filters: ReadonlyArray<FilterInfo>
   readonly where: (sql: SqlHelpers, q: ListQuery<Sortable, FilterKey>) => Statement.Fragment
   readonly orderBy: (sql: SqlHelpers, q: ListQuery<Sortable, FilterKey>, idColumn: string) => Statement.Fragment
+  /**
+   * URL search params for a query; values equal to the defaults are omitted.
+   * Filters use their field name (`?role=admin&teamId=3&sort=name`).
+   */
+  readonly toSearchParams: (q: ListQuery<Sortable, FilterKey>) => URLSearchParams
+  /** Query from URL search params. Lenient: invalid or unknown params fall back to defaults. */
+  readonly fromSearchParams: (params: URLSearchParams) => ListQuery<Sortable, FilterKey>
 }
 
 /** The subset of the `sql` tag we use. */
@@ -99,13 +106,24 @@ export const make = <
     operator
   }))
 
-  const schema = Schema.Struct({
+  const pieces = {
     page: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
     pageSize: Schema.Literals(config.pageSizes),
     sort: Schema.Literals(config.sortable),
-    dir: Schema.Literals(["asc", "desc"]),
-    filters: Schema.Struct(Object.fromEntries(filters.map((f) => [f.key, filterSchema(f, f.operator)])))
+    dir: Schema.Literals(["asc", "desc"])
+  }
+  const filterSchemas = Object.fromEntries(filters.map((f) => [f.key, filterSchema(f, f.operator)]))
+  const schema = Schema.Struct({
+    ...pieces,
+    filters: Schema.Struct(filterSchemas)
   }) as unknown as QueryDef<Sortable, FK>["schema"]
+
+  /** Decode one URL param with its own schema; `undefined` if invalid. */
+  const param = (s: Schema.Top, raw: string | null, numeric: boolean): unknown => {
+    if (raw === null) return undefined
+    const exit = Schema.decodeUnknownExit(s as Schema.Codec<unknown, unknown>)(numeric ? Number(raw) : raw)
+    return exit._tag === "Success" ? exit.value : undefined
+  }
 
   const initial: ListQuery<Sortable, FK> = {
     page: 1,
@@ -115,9 +133,39 @@ export const make = <
     filters: Object.fromEntries(filters.map((f) => [f.key, ""])) as ListQuery<Sortable, FK>["filters"]
   }
 
+  const toSearchParams = (q: ListQuery<Sortable, FK>) => {
+    const params = new URLSearchParams()
+    for (const f of filters) {
+      const v = (q.filters as Record<string, string>)[f.key]
+      if (v) params.set(f.key, v)
+    }
+    if (q.sort !== initial.sort || q.dir !== initial.dir) {
+      params.set("sort", q.sort)
+      params.set("dir", q.dir)
+    }
+    if (q.pageSize !== initial.pageSize) params.set("pageSize", String(q.pageSize))
+    if (q.page !== 1) params.set("page", String(q.page))
+    return params
+  }
+
+  const fromSearchParams = (params: URLSearchParams): ListQuery<Sortable, FK> => {
+    const or = <A>(value: unknown, fallback: A) => (value === undefined ? fallback : value as A)
+    return {
+      page: or(param(pieces.page, params.get("page"), true), initial.page),
+      pageSize: or(param(pieces.pageSize, params.get("pageSize"), true), initial.pageSize),
+      sort: or(param(pieces.sort, params.get("sort"), false), initial.sort),
+      dir: or(param(pieces.dir, params.get("dir"), false), initial.dir),
+      filters: Object.fromEntries(
+        filters.map((f) => [f.key, or(param(filterSchemas[f.key]!, params.get(f.key), false), "")])
+      ) as ListQuery<Sortable, FK>["filters"]
+    }
+  }
+
   return {
     schema,
     initial,
+    toSearchParams,
+    fromSearchParams,
     sortable: config.sortable,
     pageSizes: config.pageSizes,
     filters,

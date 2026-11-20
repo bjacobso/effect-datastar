@@ -87,6 +87,8 @@ const mods = (m?: Modifiers): string => {
 export const bind = (path: SignalPath): Attrs => ({ "data-bind": path })
 export const on = (event: string, expr: Expr, m?: Modifiers): Attrs => ({ [`data-on:${event}${mods(m)}`]: expr })
 export const init = (expr: Expr): Attrs => ({ "data-init": expr })
+/** Re-run `expr` whenever a signal it reads changes. */
+export const effect = (expr: Expr): Attrs => ({ "data-effect": expr })
 export const text = (expr: Expr): Attrs => ({ "data-text": expr })
 export const show = (expr: Expr): Attrs => ({ "data-show": expr })
 export const attr = (name: string, expr: Expr): Attrs => ({ [`data-attr:${name}`]: expr })

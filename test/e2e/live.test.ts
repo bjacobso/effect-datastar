@@ -125,6 +125,34 @@ describe("users page", () => {
   })
 })
 
+describe("URL state", () => {
+  it("mirrors the query into the URL and restores it on reload", async () => {
+    const page = await open("/users")
+    await page.locator("button.sort", { hasText: "Email" }).click()
+    await page.locator("#users-filter-teamId").selectOption({ label: "Design" })
+    await page.fill(`input[placeholder^="Search name"]`, "ada")
+    await expect.poll(() => new URL(page.url()).search).toBe("?name=ada&teamId=3&sort=email&dir=asc")
+    const before = await firstColumn(page)
+
+    await page.reload()
+    // Server-rendered: the table is right before any script runs.
+    expect(await firstColumn(page)).toEqual(before)
+    expect(await page.inputValue(`input[placeholder^="Search name"]`)).toBe("ada")
+    await expect.poll(() =>
+      page.locator("#users-filter-teamId").evaluate((s: HTMLSelectElement) => s.selectedOptions[0]!.text)
+    ).toBe("Design")
+    expect(page.errors).toEqual([])
+    await page.close()
+  })
+
+  it("opens a shared link directly", async () => {
+    const page = await browser.newPage()
+    await page.goto(base + "/users?teamId=null&pageSize=25")
+    expect(await total(page).innerText()).toBe("14 total")
+    await page.close()
+  })
+})
+
 describe("live updates across tabs", () => {
   it("renaming a team in one tab updates the users tab", async () => {
     const users = await open("/users")

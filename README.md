@@ -1,13 +1,42 @@
 # effect-datastar
 
-An exploration of a fully Effect-native [Datastar](https://data-star.dev) app: schema-driven CRUD resources (users and teams, related by a foreign key) with pagination, sorting, filtering, create, update and delete, and live updates across tabs. The server side is end-to-end [Effect](https://effect.website) 4.
+An exploration of a fully Effect-native [Datastar](https://data-star.dev) app: schema-driven CRUD resources (users and teams, related by a foreign key) with pagination, sorting, filtering, create, update and delete, live updates across tabs, and the list state kept in the URL. The server side is end-to-end [Effect](https://effect.website) 4.
 
 ```sh
 npm install
 npm run dev        # http://localhost:3000/users
+npm test           # unit + HTTP tests (in-process, in-memory SQLite)
+npm run test:e2e   # browser tests (real server + Playwright Chromium)
 ```
 
-Requires Node 24+ (uses `node:sqlite`).
+Requires Node 24+ (uses `node:sqlite`). For the browser tests, run `npx playwright install chromium` once.
+
+## A resource
+
+```tsx
+export const Users = Resource.make({
+  name: "users",
+  title: "Users",
+  noun: "user",
+  model: User,                 // Model.Class: the single source of truth
+  idColumn: "id",
+  display: "name",
+  query: {
+    sortable: ["name", "email", "role", "createdAt"],
+    filters: { name: "contains", email: "contains", role: "eq", teamId: "eq", active: "eq" },
+    defaultSort: ["createdAt", "desc"],
+    pageSizes: [10, 25, 50]
+  },
+  relations: { teamId: Teams.Lookup },
+  messages: {
+    unique: { email: "Email is already taken" },
+    invalidReference: { teamId: "That team no longer exists" }
+  },
+  layout: Layout
+})
+```
+
+That gives the page (server-rendered for the query in the URL), a live table, filters, sorting, paging, a create/edit dialog with per-field validation errors, delete, and the `Repo` / `Lookup` services. Everything it builds is exposed, so a resource can drop down a level when the config isn't enough.
 
 ## Layout
 
@@ -16,13 +45,15 @@ Requires Node 24+ (uses `node:sqlite`).
   - `Attrs.ts`: signal paths checked against the signals schema, attribute helpers
   - `Endpoint.ts`: route plus typed client action (`remove.call({ id })` produces `@delete('/users/3')`)
 - `src/crud/`: building blocks derived from a schema
-  - `Query.ts`: query signals schema, SQL `WHERE` / `ORDER BY`
+  - `Resource.tsx`: composes everything below into a resource
+  - `Query.ts`: query signals schema, SQL `WHERE` / `ORDER BY`, URL params
   - `Repo.ts`: `SqlModel.makeRepository` plus paginated `list` and a reactive `live` stream
-  - `Field.ts`, `Form.ts`: field metadata, form drafts (with input coercion) and per-field errors
   - `Lookup.ts`: options from another table, for foreign-key selects, filters and labels
+  - `Field.ts`, `Form.ts`: field metadata, form drafts (with input coercion) and per-field errors
+  - `components.tsx`: generic filter bar, sortable table, pagination, form fields and dialog (`@kitajs/html`)
   - `Feedback.tsx`: toast and unexpected-error patches
-  - `components.tsx`: generic filter bar, sortable table, pagination and form fields (`@kitajs/html`)
-- `src/app/`: the `users` and `teams` resources, composed from the pieces above, plus migrations (`Db.ts`)
+- `src/app/`: the `users` and `teams` resources, migrations (`Db.ts`) and app composition (`App.tsx`)
+- `test/`: unit, in-process HTTP, and browser (`test/e2e`) tests
 
 ## How live updates work
 
@@ -33,3 +64,11 @@ browser re-issues the request and Datastar cancels the previous stream.
 
 The users view listens to both `users` and `teams`, so renaming or adding a team
 updates the team column and the team selects in every open users tab.
+
+## URL state
+
+`GET /users?teamId=3&sort=name&dir=asc` renders that query on the server, so the
+first paint has the table. Each new live stream patches a local signal
+(`users._url`) with the canonical URL, which the page mirrors into the address
+bar with `history.replaceState`. Both directions use the same `Query` config:
+defaults are left out of the URL, and invalid params fall back to defaults.

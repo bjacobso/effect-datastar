@@ -26,12 +26,40 @@ const view = async (q: ReturnType<typeof usersQuery>, firstDone = hasTable) => {
   return { ...s, first, next: () => s.until(hasTable) }
 }
 
+const decodeEntities = (s: string) => s.replace(/&#34;/g, '"').replace(/&quot;/g, '"').replace(/&amp;/g, "&")
+const initialSignals = (html: string) => JSON.parse(decodeEntities(/data-signals="([^"]*)"/.exec(html)![1]!))
+
 describe("pages", () => {
-  it("renders the users page shell with initial signals", async () => {
+  it("server-renders the first page with team names and options", async () => {
     const html = await app.page("/users")
     expect(html).toContain("<!doctype html>")
-    expect(html).toContain(`data-signals="`)
     expect(html).toContain(`data-init="@get('/users/view'`)
+    expect(total(html)).toBe(87)
+    expect(rowNames(html)).toHaveLength(10)
+    expect(html).toContain(`<option value="2">Growth</option>`)
+    expect(initialSignals(html).users.query).toEqual(usersQuery().users.query)
+  })
+
+  it("renders the query from the URL into the table and the signals", async () => {
+    const html = await app.page("/users?teamId=null&sort=name&dir=asc&pageSize=25")
+    expect(total(html)).toBe(14)
+    const names = rowNames(html)
+    expect([...names].sort((a, b) => a!.localeCompare(b!))).toEqual(names)
+    expect(initialSignals(html).users.query).toEqual(
+      usersQuery({ sort: "name", dir: "asc", pageSize: 25 }, { teamId: "null" }).users.query
+    )
+  })
+
+  it("clamps an out-of-range page from the URL", async () => {
+    const html = await app.page("/users?page=99")
+    expect(html).toContain("Page 9 of 9")
+    expect(initialSignals(html).users.query.page).toBe(9)
+  })
+
+  it("falls back to defaults for invalid URL params", async () => {
+    const html = await app.page("/users?sort=password&role=root")
+    expect(total(html)).toBe(87)
+    expect(initialSignals(html).users.query).toEqual(usersQuery().users.query)
   })
 })
 
@@ -62,6 +90,12 @@ describe("users live view", () => {
     expect(names).toHaveLength(25)
     expect([...names].sort((a, b) => a!.localeCompare(b!))).toEqual(names)
     expect(table(s.first)).toContain("Page 2 of 4")
+  })
+
+  it("sends the canonical URL once per stream", async () => {
+    const s = await view(usersQuery({ sort: "name", dir: "asc" }, { role: "admin" }))
+    await s.close()
+    expect(signals(s.first)).toEqual([{ users: { _url: "/users?role=admin&sort=name&dir=asc" } }])
   })
 
   it("clamps an out-of-range page by patching the query signal", async () => {

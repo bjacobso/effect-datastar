@@ -23,7 +23,7 @@
  * `${name}.{query,draft,errors,dialog}`, DOM id prefix.
  */
 import { Context, Effect, Layer, Schema, Stream } from "effect"
-import { HttpRouter, HttpServerResponse } from "effect/http"
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { Reactivity } from "effect/reactivity"
 import type { Model } from "effect/schema"
 import type { SqlError } from "effect/sql"
@@ -202,6 +202,14 @@ export const make = <
   // Paths are typed as fixed literals (`/resource/:id`) so path params type-check
   // through the generic `name`; the real path is used at runtime.
 
+  const relationServices = Effect.forEach(relations, ([key, tag]) => Effect.map(Effect.service(tag), (l) => [key, l] as const))
+
+  /** Canonical URL for a query, e.g. `/users?teamId=3&sort=name&dir=asc`. */
+  const urlFor = (q: Query.ListQuery<Sortable, FK>) => {
+    const qs = query.toSearchParams(q).toString()
+    return qs ? `/${name}?${qs}` : `/${name}`
+  }
+
   const lookupsFor = (services: ReadonlyArray<readonly [string, Lookup.Lookup]>) =>
     Effect.map(
       Effect.forEach(services, ([key, l]) => Effect.map(l.options, (o) => [key, o] as const)),
@@ -237,7 +245,9 @@ export const make = <
 
   /**
    * Live view: re-runs when this table or any related table changes. Relation
-   * selects are re-sent only when their options changed.
+   * selects are re-sent only when their options changed. The first emission
+   * also patches `${name}._url` (a local signal, never sent back), which the
+   * page mirrors into the address bar.
    */
   const view = Endpoint.make(
     "GET",
@@ -245,9 +255,10 @@ export const make = <
     Stream.unwrap(Effect.gen(function*() {
       const repo = yield* RepoTag
       const reactivity = yield* Reactivity.Reactivity
-      const services = yield* Effect.forEach(relations, ([key, tag]) => Effect.map(Effect.service(tag), (l) => [key, l] as const))
+      const services = yield* relationServices
       const q = yield* readQuery
       let lastOptions: string | undefined
+      let urlSent = false
       return reactivity.stream(
         [name, ...services.map(([, l]) => l.table)],
         Effect.all([repo.list(q), lookupsFor(services)])
@@ -262,6 +273,10 @@ export const make = <
           if (key !== lastOptions) {
             lastOptions = key
             events.push(...relationSelects(lookups))
+          }
+          if (!urlSent) {
+            urlSent = true
+            events.push(Datastar.patchSignals({ [name]: { _url: urlFor(q) } }))
           }
           return events
         })
@@ -392,9 +407,18 @@ export const make = <
     </section>
   )
 
-  /** Page shell. Table content and relation options arrive over the live stream. */
-  const Page = () => (
-    <main {...signals.init({ [name]: { query: query.initial, draft: blankDraft, errors: noErrors, dialog: false } } as any)}>
+  /**
+   * The page, server-rendered for the query in the URL. The live stream then
+   * takes over: it re-renders on changes and keeps the URL in sync.
+   */
+  const Page = (props: {
+    readonly query: Query.ListQuery<Sortable, FK>
+    readonly initial?: { readonly page: Repo.Page<Row>; readonly lookups: Components.Lookups } | undefined
+  }) => (
+    <main
+      {...signals.init({ [name]: { query: props.query, draft: blankDraft, errors: noErrors, dialog: false } } as any)}
+      {...ds.effect(`${$("_url")} && ${$("_url")} !== location.pathname + location.search && history.replaceState(null, '', ${$("_url")})`)}
+    >
       <header class="bar">
         <h1 safe>{config.title}</h1>
         <button
@@ -406,7 +430,7 @@ export const make = <
           New {config.noun}
         </button>
       </header>
-      <Components.FilterBar prefix={name} filters={query.filters} query={path("query")} />
+      <Components.FilterBar prefix={name} filters={query.filters} query={path("query")} lookups={props.initial?.lookups} />
       <div
         id={`${name}-live`}
         {...ds.merge(
@@ -414,7 +438,9 @@ export const make = <
           ds.onSignalPatch(view.call(), { include: [path("query")], debounce: "200ms" })
         )}
       >
-        <section id={`${name}-table`} aria-busy="true">Loading…</section>
+        {props.initial
+          ? <TableView page={props.initial.page} query={props.query} lookups={props.initial.lookups} />
+          : <section id={`${name}-table`} aria-busy="true">Loading…</section>}
       </div>
       <Components.FormDialog
         prefix={name}
@@ -424,6 +450,7 @@ export const make = <
         errors={path("errors")}
         open={path("dialog")}
         submit={`${$("draft", "id")} ? ${update.call({ id: Endpoint.js($("draft", "id")) })} : ${create.call()}`}
+        lookups={props.initial?.lookups}
       />
       <Components.Toast />
     </main>
@@ -432,9 +459,30 @@ export const make = <
   const page = HttpRouter.route(
     "GET",
     `/${name}`,
-    HttpServerResponse.html(
-      config.layout({ title: config.title, active: `/${name}`, children: <Page /> }) as string
-    )
+    Effect.gen(function*() {
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const repo = yield* RepoTag
+      const services = yield* relationServices
+      let q = query.fromSearchParams(new URL(request.url, "http://localhost").searchParams)
+      const initial = yield* Effect.gen(function*() {
+        let page = yield* repo.list(q)
+        if (page.page > page.pages) {
+          q = { ...q, page: page.pages }
+          page = yield* repo.list(q)
+        }
+        return { page, lookups: yield* lookupsFor(services) }
+      }).pipe(
+        // If the first render fails, serve the shell; the live stream reports the error.
+        Effect.tapError((e) => Effect.logError("initial render failed", e)),
+        Effect.option
+      )
+      const html = config.layout({
+        title: config.title,
+        active: `/${name}`,
+        children: <Page query={q} initial={initial._tag === "Some" ? initial.value : undefined} />
+      })
+      return HttpServerResponse.html(typeof html === "string" ? html : yield* Effect.promise(() => html))
+    })
   )
 
   const routes = HttpRouter.addAll([page, view.route, create.route, update.route, edit.route, remove.route])

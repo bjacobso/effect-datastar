@@ -83,3 +83,23 @@ layer(SqliteClient.layer({ filename: ":memory:" }))("Query SQL", (it) => {
       expect(params).toEqual([])
     }))
 })
+
+describe("Query URL params", () => {
+  it("omits defaults", () => {
+    expect(UserQuery.toSearchParams(UserQuery.initial).toString()).toBe("")
+  })
+
+  it("round-trips a non-default query", () => {
+    const q = query({ page: 3, pageSize: 25, sort: "name", dir: "asc" }, { name: "ada", teamId: "null", active: "true" })
+    const params = UserQuery.toSearchParams(q)
+    expect(params.toString()).toBe("name=ada&teamId=null&active=true&sort=name&dir=asc&pageSize=25&page=3")
+    expect(UserQuery.fromSearchParams(params)).toEqual(q)
+  })
+
+  it("ignores invalid and unknown params, keeping the rest", () => {
+    const q = UserQuery.fromSearchParams(
+      new URLSearchParams("sort=password&dir=asc&page=-2&pageSize=7&role=root&teamId=2&evil=1")
+    )
+    expect(q).toEqual(query({ dir: "asc" }, { teamId: "2" }))
+  })
+})
