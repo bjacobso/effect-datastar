@@ -4,9 +4,10 @@ An exploration of a fully Effect-native [Datastar](https://data-star.dev) app: s
 
 ```sh
 npm install
-npm run dev        # http://localhost:3000/users
+npm run dev        # build in watch mode and (re)start the server: http://localhost:3000/users
+npm start          # production build, then node dist/server.js
 npm test           # unit + HTTP tests (in-process, in-memory SQLite)
-npm run test:e2e   # browser tests (real server + Playwright Chromium)
+npm run test:e2e   # browser tests (builds once, real server + Playwright Chromium)
 ```
 
 Requires Node 24+ (uses `node:sqlite`). For the browser tests, run `npx playwright install chromium` once.
@@ -79,17 +80,91 @@ the query string. Its query lives in its signals and resets on reload.
   - `Datastar.ts`: patch events, SSE `respond` (the handler error type must be `never`), schema-decoded `signals`
   - `Attrs.ts`: signal paths checked against the signals schema, attribute helpers
   - `Endpoint.ts`: route plus typed client action (`remove.call({ id })` produces `@delete('/users/3')`)
+  - `Html.ts`: React element to HTML string (`render` for patches, `document` for pages)
 - `src/crud/`: building blocks derived from a schema
   - `Resource.tsx`: composes everything below into a resource
   - `Query.ts`: query signals schema, SQL `WHERE` / `ORDER BY`, URL params
   - `Repo.ts`: `SqlModel.makeRepository` plus paginated `list` and a `live` stream with row-level updates
   - `Lookup.ts`: options from another table, for foreign-key selects, filters and labels
   - `Field.ts`, `Form.ts`: field metadata, form drafts (with input coercion) and per-field errors
-  - `components.tsx`: generic filter bar, sortable table, pagination, form fields and dialog (`@kitajs/html`)
+  - `components.tsx`: generic filter bar, sortable table, pagination, form fields and dialog (React + StyleX)
   - `Feedback.tsx`: toast and unexpected-error patches
+- `src/ui/`: the design system, copied from `@dw/ui` (document-workflow-service `packages/ui`): StyleX tokens and themes (`theme/`), global CSS and fonts, Button, form styles and the ui-sdk Select, Dialog (`overlay.tsx`), Menu, display pieces and icons
+- `src/islands/`: React islands inside Datastar pages (`Island.tsx`: the `<ds-island>` host; `islands.tsx`: Select, Dialog, Theme; `client.tsx`: the browser bundle)
 - `src/reactivity/`: `Reactivity` across processes (`Broadcast`, `DistributedReactivity`, `SqliteBroadcast`)
 - `src/app/`: the `users` and `teams` resources, the team detail page with embedded members (`TeamDetail.tsx`), migrations (`Db.ts`) and app composition (`App.tsx`)
+- `scripts/build.ts`: the esbuild + StyleX build (`npm run build`, `npm run dev`)
 - `test/`: unit, in-process HTTP, and browser (`test/e2e`) tests
+
+## Stack
+
+- **Server:** Effect 4 HTTP. Every page and patch is React rendered on the server with
+  `renderToStaticMarkup` (`src/datastar/Html.ts`). Static markup has no `<!-- -->` text
+  separators, so Datastar morphs plain HTML; nothing server-rendered is hydrated. Datastar
+  attributes (`data-on:click`, `data-on-signal-patch-filter`, ...) are spread from the typed
+  `Attrs` helpers and reach the HTML unchanged (`test/render.test.tsx`).
+- **Styling:** StyleX with the `@dw/ui` tokens (`--dw-*` custom properties), so this app and
+  document-workflow-service share one design. Dark mode follows `prefers-color-scheme`; the
+  theme menu in the header forces Light or Dark (saved per browser, applied before first paint).
+  The only global CSS is `src/ui/theme/global.css` (reset, fonts, the `ui-sdk` layer).
+- **Browser:** Datastar owns state (signals, SSE, morphing). React runs only in islands.
+- **Build:** StyleX must be compiled, and the server renders nearly every component, so the
+  server is bundled too. `scripts/build.ts` runs esbuild with `@stylexjs/unplugin` twice in
+  one process, server then browser, and writes:
+  - `dist/server.js`, the server, with dependencies left external.
+  - `public/build/islands.js`, React and the islands.
+  - `public/build/app.css`, the global CSS and fonts plus every StyleX rule from both builds.
+    It is served as a static file.
+
+  Vitest compiles StyleX with the unplugin's Vite plugin. The e2e global setup builds once and
+  the tests start `node dist/server.js`.
+
+## Islands
+
+An island is a React component that also runs in the browser. The server renders its host,
+with the component rendered once as a placeholder:
+
+```tsx
+<Island.Mount
+  island={Select}
+  id="users-field-teamId"
+  props={{ options, label: "Team", emptyLabel: "No team" }}
+  attrs={ds.merge(ds.bind("users.draft.teamId"), ds.attr("aria-invalid", "$users.errors.teamId ? 'true' : 'false'"))}
+/>
+// <ds-island name="select" props='{"options":[...]}' data-bind="users.draft.teamId" ...>
+//   <div data-island-root data-ignore-morph>…placeholder…</div>
+// </ds-island>
+```
+
+`islands.js` defines `<ds-island>`, which mounts the component with `createRoot` (it doesn't
+hydrate, so server and client markup never have to match). The host element is where Datastar
+and React meet:
+
+- **Value:** Datastar v1 binds `data-bind` to the `value` property of any custom element that
+  has one, and listens for `change`. The island reads `host.value`; `host.setValue(v)` sets it
+  and dispatches `change`, so `$users.draft.teamId` follows. Datastar writes to the property, and
+  the island re-renders. `islands.js` loads before `datastar.js`, so hosts are already upgraded
+  when Datastar binds them. Before the upgrade they have no `value` property, and Datastar would
+  bind the attribute instead. The ui-sdk Select fires its own `input`/`change` events from a
+  hidden form input; these are stopped at the island root so they don't reach the binding.
+- **Other inputs:** host attributes. The island re-renders on any attribute change, `props`
+  included. Example: `data-attr:open="$users.dialog"`.
+- **Outputs:** events on the host, e.g. `host.emit("close")` for `data-on:close="$users.dialog = false"`.
+- **Morphs:** the React root has `data-ignore-morph`, so a morph of an ancestor leaves React's
+  DOM alone. The host's attributes still update.
+- **New options:** when a team changes, the live view re-sends the select with `replace`. The
+  old island unmounts, a new one mounts with the new `props`, and `data-bind` gives it the
+  current value. The dialog stays open.
+
+Islands in this app:
+
+- `Select`: the relation field in the create/edit form, a ui-sdk Select. Filters stay native
+  `<select>`s.
+- `Dialog`: the create/edit dialog, a ui-sdk Dialog that is open while `$ns.dialog` is true.
+  Escape, the backdrop and the close button emit `close`. Its content is the server-rendered
+  form, sent in a `<template>` and placed once with `keepMounted`. Datastar binds that form like
+  any other markup, and the select inside it always exists as a patch target.
+- `Theme`: the Light/Dark/System menu (ui-sdk Menu).
 
 ## How live updates work
 
@@ -144,7 +219,7 @@ Layer.mergeAll(Users.layer, Teams.layer).pipe(
   (`INVALIDATION_POLL_INTERVAL="50 millis"` or `Infra({ pollInterval })`).
 
 ```sh
-PORT=3000 npm start & PORT=3001 npm start   # same app.db; edit in one, watch the other
+npm run build && (PORT=3000 npm run serve & PORT=3001 npm run serve)   # same app.db; edit in one, watch the other
 ```
 
 ## URL state

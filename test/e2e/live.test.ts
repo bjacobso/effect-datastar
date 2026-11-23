@@ -1,45 +1,38 @@
 /**
- * Browser end-to-end: the real server (temp SQLite file) + headless Chromium,
+ * Browser end-to-end: the real (built) server on a temp SQLite file + headless Chromium,
  * two tabs to check live updates across pages.
  */
-import { type ChildProcess, spawn } from "node:child_process"
+import type { ChildProcess } from "node:child_process"
 import { mkdtempSync, rmSync } from "node:fs"
-import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { type Browser, chromium, type Page } from "playwright"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import {
+  closed,
+  dialog,
+  firstColumn,
+  open as openTab,
+  pageText,
+  pickTeam,
+  save,
+  sortBy,
+  startServer,
+  teamOptions,
+  teamTrigger,
+  total
+} from "./helpers.ts"
 
 let server: ChildProcess
 let browser: Browser
 let base: string
 let dir: string
 
-const freePort = () =>
-  new Promise<number>((resolve) => {
-    const s = createServer().listen(0, () => {
-      const port = (s.address() as { port: number }).port
-      s.close(() => resolve(port))
-    })
-  })
-
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "effect-datastar-"))
-  const port = await freePort()
-  base = `http://localhost:${port}`
-  server = spawn("npx", ["tsx", "src/main.tsx"], {
-    env: { ...process.env, PORT: String(port), DB: join(dir, "e2e.db") },
-    stdio: "pipe"
-  })
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("server did not start")), 30_000)
-    server.stdout!.on("data", (chunk: Buffer) => {
-      if (chunk.toString().includes("Listening on")) {
-        clearTimeout(timer)
-        resolve()
-      }
-    })
-  })
+  const started = await startServer(join(dir, "e2e.db"))
+  server = started.process
+  base = started.url
   browser = await chromium.launch()
 })
 
@@ -49,33 +42,24 @@ afterAll(async () => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-const open = async (path: string) => {
-  const page = await browser.newPage()
-  const errors: Array<string> = []
-  page.on("pageerror", (e) => errors.push(String(e)))
-  page.on("console", (m) => m.type() === "error" && errors.push(m.text()))
-  page.on("dialog", (d) => d.accept())
-  await page.goto(base + path)
-  await page.locator("tbody tr").first().waitFor()
-  return Object.assign(page, { errors })
-}
-
-const total = (page: Page) => page.locator(".pagination > span").first()
-const firstColumn = (page: Page) => page.locator("tbody tr td:first-child").allInnerTexts()
+const open = (path: string) => openTab(browser, base + path)
+const teamColumn = (page: Page) => page.locator("tbody tr td:nth-child(4)").first()
+const filterText = (page: Page, id: string) =>
+  page.locator(id).evaluate((s: HTMLSelectElement) => s.selectedOptions[0]!.text)
 
 describe("users page", () => {
   it("sorts, pages, filters and changes page size", async () => {
     const page = await open("/users")
     await expect.poll(() => total(page).innerText()).toBe("87 total")
 
-    await page.locator("button.sort", { hasText: "Name" }).click()
+    await sortBy(page, "Name")
     await expect.poll(async () => (await firstColumn(page))[0]).toBe("Ada Hamilton")
 
-    await page.locator(".pagination button", { hasText: "›" }).click()
-    await expect.poll(() => page.locator(".pagination .pages span").innerText()).toBe("Page 2 of 9")
+    await page.getByRole("button", { name: "Next page" }).click()
+    await expect.poll(() => pageText(page).innerText()).toBe("Page 2 of 9")
 
-    await page.locator(".pagination select").selectOption("25")
-    await expect.poll(() => page.locator(".pagination .pages span").innerText()).toBe("Page 1 of 4")
+    await page.locator("nav[aria-label=Pagination] select").selectOption("25")
+    await expect.poll(() => pageText(page).innerText()).toBe("Page 1 of 4")
 
     await page.fill(`input[placeholder^="Search name"]`, "grace")
     await expect.poll(() => total(page).innerText()).toBe("8 total")
@@ -89,10 +73,11 @@ describe("users page", () => {
 
   it("validates, creates, edits and deletes through the dialog", async () => {
     const page = await open("/users")
-    await page.locator("header button", { hasText: "New user" }).click()
-    await page.fill("dialog input[type=email]", "bad")
-    await page.locator("dialog button[type=submit]").click()
-    await expect.poll(() => page.locator("dialog .error").allInnerTexts()).toEqual([
+    await page.getByRole("button", { name: "New user" }).click()
+    await expect.poll(() => dialog(page).getByRole("dialog").isVisible()).toBe(true)
+    await dialog(page).locator("input[type=email]").fill("bad")
+    await dialog(page).locator("button[type=submit]").click()
+    await expect.poll(() => dialog(page).locator("small[aria-live]").allTextContents()).toEqual([
       "Name is required",
       "Enter a valid email",
       "",
@@ -100,22 +85,22 @@ describe("users page", () => {
       ""
     ])
 
-    await page.fill("dialog input[type=text]", "E2E Person")
-    await page.fill("dialog input[type=email]", "e2e@example.com")
-    await page.locator("#users-field-teamId").selectOption({ label: "Design" })
-    await page.locator("dialog button[type=submit]").click()
+    await dialog(page).locator("input[type=text]").fill("E2E Person")
+    await dialog(page).locator("input[type=email]").fill("e2e@example.com")
+    await pickTeam(page, "Design")
+    await save(page)
     await expect.poll(() => page.locator("#toast").innerText()).toBe("Created E2E Person")
-    await expect.poll(() => page.locator("dialog[open]").count()).toBe(0)
 
     await page.fill(`input[placeholder^="Search name"]`, "e2e")
     await expect.poll(() => firstColumn(page)).toEqual(["E2E Person"])
+    // The team picked in the select island was saved.
+    expect(await teamColumn(page).innerText()).toBe("Design")
 
     await page.locator("tbody button", { hasText: "Edit" }).click()
-    await expect.poll(() => page.locator("dialog[open]").count()).toBe(1)
-    expect(await page.locator("#users-field-teamId").evaluate((s: HTMLSelectElement) => s.selectedOptions[0]!.text))
-      .toBe("Design")
-    await page.fill("dialog input[type=text]", "E2E Edited")
-    await page.locator("dialog button[type=submit]").click()
+    await expect.poll(() => dialog(page).count()).toBe(1)
+    await expect.poll(() => teamTrigger(page).innerText()).toBe("Design")
+    await dialog(page).locator("input[type=text]").fill("E2E Edited")
+    await save(page)
     await expect.poll(() => firstColumn(page)).toEqual(["E2E Edited"])
 
     await page.locator("tbody button", { hasText: "Delete" }).click()
@@ -123,12 +108,90 @@ describe("users page", () => {
     expect(page.errors).toEqual([])
     await page.close()
   })
+
+  it("closes the dialog with Escape, Cancel and the close button", async () => {
+    const page = await open("/users")
+    for (const close of [
+      () => page.keyboard.press("Escape"),
+      () => dialog(page).getByRole("button", { name: "Cancel" }).click(),
+      () => dialog(page).getByRole("button", { name: "Close" }).click()
+    ]) {
+      await page.getByRole("button", { name: "New user" }).click()
+      await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true)
+      await close()
+      await closed(page)
+      // The `dialog` signal followed: the host lost its `open` attribute.
+      expect(await dialog(page).count()).toBe(0)
+    }
+    expect(page.errors).toEqual([])
+    await page.close()
+  })
+})
+
+describe("team select island", () => {
+  it("changing a user's team in the form saves it", async () => {
+    const page = await open("/users?email=ken.torvalds79%40")
+    await expect.poll(() => total(page).innerText()).toBe("1 total")
+    const before = await teamColumn(page).innerText()
+    const next = before === "Support" ? "Infrastructure" : "Support"
+
+    await page.locator("tbody button", { hasText: "Edit" }).click()
+    await expect.poll(() => teamTrigger(page).innerText()).toBe(before)
+    await pickTeam(page, next)
+    await expect.poll(() => teamTrigger(page).innerText()).toBe(next)
+    await save(page)
+    await expect.poll(() => teamColumn(page).innerText()).toBe(next)
+
+    // And back to no team, through the explicit "No team" option.
+    await page.locator("tbody button", { hasText: "Edit" }).click()
+    await expect.poll(() => teamTrigger(page).innerText()).toBe(next)
+    await pickTeam(page, "No team")
+    await save(page)
+    await expect.poll(() => teamColumn(page).innerText()).toBe("—")
+
+    // Restore the seeded team (later tests count members).
+    await page.locator("tbody button", { hasText: "Edit" }).click()
+    await expect.poll(() => teamTrigger(page).innerText()).toBe("No team")
+    await pickTeam(page, before)
+    await save(page)
+    await expect.poll(() => teamColumn(page).innerText()).toBe(before)
+
+    expect(page.errors).toEqual([])
+    await page.close()
+  })
+
+  it("updates its options live when a team is renamed in another tab, keeping the value", async () => {
+    const users = await open("/users")
+    const teams = await open("/teams")
+    await users.locator("#users-filter-teamId").selectOption({ label: "Platform" })
+    await expect.poll(() => teamColumn(users).innerText()).toBe("Platform")
+
+    // An open edit dialog, with Platform chosen.
+    await users.locator("tbody button", { hasText: "Edit" }).first().click()
+    await expect.poll(() => teamTrigger(users).innerText()).toBe("Platform")
+
+    await teams.locator("tbody tr", { hasText: "Platform" }).locator("button", { hasText: "Edit" }).click()
+    await dialog(teams).locator("input[type=text]").fill("Platform Core")
+    await save(teams)
+
+    // The server re-sent the select: same value, new label, new options.
+    await expect.poll(() => teamTrigger(users).innerText()).toBe("Platform Core")
+    const options = await teamOptions(users)
+    expect(options).toContain("Platform Core")
+    expect(options).not.toContain("Platform")
+    // The dialog stayed open through it.
+    expect(await dialog(users).count()).toBe(1)
+
+    expect([...users.errors, ...teams.errors]).toEqual([])
+    await users.close()
+    await teams.close()
+  })
 })
 
 describe("URL state", () => {
   it("mirrors the query into the URL and restores it on reload", async () => {
     const page = await open("/users")
-    await page.locator("button.sort", { hasText: "Email" }).click()
+    await sortBy(page, "Email")
     await page.locator("#users-filter-teamId").selectOption({ label: "Design" })
     await page.fill(`input[placeholder^="Search name"]`, "ada")
     await expect.poll(() => new URL(page.url()).search).toBe("?name=ada&teamId=3&sort=email&dir=asc")
@@ -138,9 +201,7 @@ describe("URL state", () => {
     // Server-rendered: the table is right before any script runs.
     expect(await firstColumn(page)).toEqual(before)
     expect(await page.inputValue(`input[placeholder^="Search name"]`)).toBe("ada")
-    await expect.poll(() =>
-      page.locator("#users-filter-teamId").evaluate((s: HTMLSelectElement) => s.selectedOptions[0]!.text)
-    ).toBe("Design")
+    await expect.poll(() => filterText(page, "#users-filter-teamId")).toBe("Design")
     expect(page.errors).toEqual([])
     await page.close()
   })
@@ -161,13 +222,11 @@ describe("live updates across tabs", () => {
     await expect.poll(() => total(users).innerText()).toBe("15 total")
 
     await teams.locator("tbody tr", { hasText: "Growth" }).locator("button", { hasText: "Edit" }).click()
-    await teams.fill("dialog input[type=text]", "Growth Eng")
-    await teams.locator("dialog button[type=submit]").click()
+    await dialog(teams).locator("input[type=text]").fill("Growth Eng")
+    await save(teams)
 
-    await expect.poll(() => users.locator("tbody tr td:nth-child(4)").first().innerText()).toBe("Growth Eng")
-    await expect.poll(() =>
-      users.locator("#users-filter-teamId").evaluate((s: HTMLSelectElement) => s.selectedOptions[0]!.text)
-    ).toBe("Growth Eng")
+    await expect.poll(() => teamColumn(users).innerText()).toBe("Growth Eng")
+    await expect.poll(() => filterText(users, "#users-filter-teamId")).toBe("Growth Eng")
     expect(await total(users).innerText()).toBe("15 total")
 
     await teams.locator("tbody tr", { hasText: "Growth Eng" }).locator("button", { hasText: "Delete" }).click()
@@ -187,9 +246,9 @@ describe("live updates across tabs", () => {
     const id = await row(viewer).getAttribute("id")
 
     await row(editor).locator("button", { hasText: "Edit" }).click()
-    await expect.poll(() => editor.locator("dialog[open]").count()).toBe(1)
-    await editor.fill("dialog input[type=text]", "Row Patched")
-    await editor.locator("dialog button[type=submit]").click()
+    await expect.poll(() => dialog(editor).count()).toBe(1)
+    await dialog(editor).locator("input[type=text]").fill("Row Patched")
+    await save(editor)
 
     await expect.poll(() => row(viewer).locator("td").first().innerText()).toBe("Row Patched")
     expect(await row(viewer).getAttribute("id")).toBe(id)
@@ -212,7 +271,7 @@ describe("team detail page", () => {
     expect(await detail.locator("thead").innerText()).not.toContain("Team")
 
     // Sorting and filtering inside the embed leave the page URL alone.
-    await detail.locator("button.sort", { hasText: "Name" }).click()
+    await sortBy(detail, "Name")
     await detail.fill(`input[placeholder^="Search name"]`, "ada")
     await expect.poll(async () => Number((await total(detail).innerText()).split(" ")[0])).toBeLessThan(14)
     expect(new URL(detail.url()).pathname + new URL(detail.url()).search).toBe("/teams/5")
@@ -220,26 +279,27 @@ describe("team detail page", () => {
     await expect.poll(() => total(detail).innerText()).toBe("14 total")
 
     // Create from the embedded table: the new member lands in this team.
-    await detail.locator("#members-section header button", { hasText: "New user" }).click()
+    await detail.locator("#members-section").getByRole("button", { name: "New user" }).click()
     expect(await detail.locator("#members-dialog select").count()).toBe(1) // role only, no team
-    await detail.fill("#members-dialog input[type=text]", "Embedded Person")
-    await detail.fill("#members-dialog input[type=email]", "embedded@example.com")
-    await detail.locator("#members-dialog button[type=submit]").click()
+    expect(await detail.locator("#members-dialog ds-island").count()).toBe(0) // no team select island
+    await dialog(detail).locator("input[type=text]").fill("Embedded Person")
+    await dialog(detail).locator("input[type=email]").fill("embedded@example.com")
+    await save(detail)
     await expect.poll(() => detail.locator("#toast").innerText()).toBe("Created Embedded Person")
     await expect.poll(() => total(detail).innerText()).toBe("15 total")
 
     // A users tab sees the new member in Support, and its team cell links back.
     const users = await open("/users?name=Embedded")
-    await expect.poll(() => users.locator("tbody tr td:nth-child(4)").first().innerText()).toBe("Support")
+    await expect.poll(() => teamColumn(users).innerText()).toBe("Support")
     expect(await users.locator("tbody tr td:nth-child(4) a").getAttribute("href")).toBe("/teams/5")
 
     // Rename the team from the teams page: the detail page and the users tab follow.
     const teams = await open("/teams")
     await teams.locator("tbody tr", { hasText: "Support" }).locator("button", { hasText: "Edit" }).click()
-    await teams.fill("dialog input[type=text]", "Support Ops")
-    await teams.locator("dialog button[type=submit]").click()
+    await dialog(teams).locator("input[type=text]").fill("Support Ops")
+    await save(teams)
     await expect.poll(() => detail.locator("#teams-record h1").innerText()).toBe("Support Ops")
-    await expect.poll(() => users.locator("tbody tr td:nth-child(4)").first().innerText()).toBe("Support Ops")
+    await expect.poll(() => teamColumn(users).innerText()).toBe("Support Ops")
 
     expect([...detail.errors, ...users.errors, ...teams.errors]).toEqual([])
     await Promise.all([detail.close(), users.close(), teams.close()])
