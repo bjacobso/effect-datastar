@@ -74,8 +74,10 @@ describe("SQL statements per mutation", () => {
       // mutation + page query and COUNT per view
       "insert": 13,
       "delete": 13,
-      // mutation + page query, COUNT and team lookup per view
-      "rename team": 19
+      // read previous version + update + page query, COUNT and team lookup per view. No teams
+      // view is open here, but the previous version is read anyway: views in other
+      // processes may need the changed columns (they travel with the broadcast).
+      "rename team": 20
     })
   })
 })

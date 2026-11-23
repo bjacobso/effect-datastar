@@ -12,6 +12,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll } from "vitest"
 import * as DistributedReactivity from "../src/reactivity/DistributedReactivity.ts"
+import { InvalidationPayload } from "../src/reactivity/Payload.ts"
 import * as SqliteBroadcast from "../src/reactivity/SqliteBroadcast.ts"
 
 const dir = mkdtempSync(join(tmpdir(), "effect-datastar-reactivity-"))
@@ -29,6 +30,7 @@ const node = (filename: string, scope: Scope.Scope, options: SqliteBroadcast.Opt
     Layer.buildWithScope(scope),
     Effect.map((context) => ({
       reactivity: Context.get(context, Reactivity.Reactivity),
+      payloads: Context.get(context, InvalidationPayload),
       sql: Context.get(context, SqlClient.SqlClient)
     }))
   )
@@ -189,5 +191,92 @@ describe("DistributedReactivity over SqliteBroadcast", () => {
       a.reactivity.invalidateUnsafe(["users"])
       yield* Scope.close(inner, Exit.void)
       expect(Option.isSome(yield* onB.next())).toBe(true)
+    }).pipe(Effect.scoped))
+})
+
+describe("payloads", () => {
+  /** Records `payloads.current()` each time a handler on `keys` runs. */
+  const record = (n: { reactivity: Reactivity.Reactivity; payloads: InvalidationPayload["Service"] }, keys: Array<string>) =>
+    Effect.gen(function*() {
+      const seen = yield* Queue.unbounded<unknown>()
+      yield* Effect.acquireRelease(
+        Effect.sync(() => n.reactivity.registerUnsafe(keys, () => Queue.offerUnsafe(seen, n.payloads.current()))),
+        (cancel) => Effect.sync(cancel)
+      )
+      return { next: (ms = 2000) => Effect.timeoutOption(Queue.take(seen), Duration.millis(ms)) }
+    })
+
+  it.live("a payload reaches handlers on every node, exactly as sent", () =>
+    Effect.gen(function*() {
+      const scope = yield* Scope.Scope
+      const file = tempDb()
+      const a = yield* node(file, scope)
+      const b = yield* node(file, scope)
+      const onA = yield* record(a, ["users"])
+      const onB = yield* record(b, ["users"])
+      const payload = { table: "users", change: { _tag: "Update", id: 42, columns: ["name"] } }
+
+      a.payloads.invalidateUnsafe({ users: [42] }, payload)
+      expect(yield* onA.next()).toEqual(Option.some(payload))
+      expect(yield* onB.next()).toEqual(Option.some(payload))
+      // Outside handlers, and for invalidations without one, there is no payload.
+      expect(a.payloads.current()).toBeUndefined()
+      yield* a.reactivity.invalidate(["users"])
+      expect(yield* onB.next()).toEqual(Option.some(undefined))
+    }).pipe(Effect.scoped))
+
+  it.live("adds the payload column to a table created before payloads, and reads keys-only rows", () =>
+    Effect.gen(function*() {
+      const scope = yield* Scope.Scope
+      const file = tempDb()
+      const old = yield* SqliteClient.make({ filename: file }).pipe(Effect.provide(Reactivity.layer))
+      yield* old`CREATE TABLE reactivity_invalidations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, origin TEXT NOT NULL, keys TEXT NOT NULL, createdAt INTEGER NOT NULL
+      )`
+      const b = yield* node(file, scope)
+      const columns = yield* b.sql<{ name: string }>`SELECT name FROM pragma_table_info('reactivity_invalidations')`
+      expect(columns.map((c) => c.name)).toContain("payload")
+
+      const onB = yield* record(b, ["users"])
+      yield* old`INSERT INTO reactivity_invalidations (origin, keys, createdAt) VALUES ('old', '["users"]', ${Date.now()})`
+      expect(yield* onB.next()).toEqual(Option.some(undefined))
+    }).pipe(Effect.scoped))
+})
+
+describe("gaps", () => {
+  it.live("a node that stalls past the retention re-runs everything registered", () =>
+    Effect.gen(function*() {
+      const scope = yield* Scope.Scope
+      const file = tempDb()
+      const prunes = { retention: Duration.millis(150), pruneInterval: Duration.millis(25) }
+      const a = yield* node(file, scope, prunes)
+      // B polls so rarely that A's row is pruned before B reads it: a stall.
+      const b = yield* node(file, scope, { ...prunes, pollInterval: Duration.millis(800) })
+      // C keeps up.
+      const c = yield* node(file, scope, prunes)
+
+      const usersOnB = yield* watch(b.reactivity, ["users"])
+      const teamsOnB = yield* watch(b.reactivity, ["teams"])
+      let recordRuns = 0
+      const cancel = b.reactivity.registerUnsafe({ posts: [3] }, () => recordRuns++)
+      const teamsOnC = yield* watch(c.reactivity, ["teams"])
+      const usersOnC = yield* watch(c.reactivity, ["users"])
+
+      yield* a.reactivity.invalidate(["users"])
+      expect(Option.isSome(yield* usersOnC.next())).toBe(true)
+      yield* Effect.sleep(Duration.millis(300))
+      expect(yield* rowCount(a.sql)).toBe(0)
+
+      // B's next poll finds the row gone: everything registered on B re-runs,
+      // not only what was invalidated.
+      expect(Option.isSome(yield* usersOnB.next())).toBe(true)
+      expect(Option.isSome(yield* teamsOnB.next())).toBe(true)
+      expect(recordRuns).toBe(1)
+      cancel()
+      // C read the row in time: no gap there.
+      expect(Option.isNone(yield* teamsOnC.next(200))).toBe(true)
+
+      // B carries on from the new end: the same missed rows don't count as a gap twice.
+      expect(Option.isNone(yield* teamsOnB.next(1000))).toBe(true)
     }).pipe(Effect.scoped))
 })

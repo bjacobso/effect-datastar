@@ -14,10 +14,18 @@
  *   - anything else (insert, delete, an update to a sorted or filtered column,
  *     a dependency changing, or a bare `Reactivity.invalidate(["users"])` that
  *     didn't come from this repo) re-runs the full page query.
+ *
+ * The `Change` travels as the invalidation's payload (`InvalidationPayload`),
+ * JSON-encoded: `{ table: "users", change: { _tag: "Update", id: 42, columns:
+ * ["name"] } }`. Streams decode the payload of whatever invalidation woke
+ * them, so a change made by another server process (through
+ * `DistributedReactivity`) is handled exactly like a local one. No payload, or
+ * one that doesn't decode, means "unknown change": a full re-query.
  */
-import { type Cause, Effect, Queue, Schema, Stream } from "effect"
+import { type Cause, Effect, Option, Queue, Schema, Stream } from "effect"
 import type * as Arr from "effect/Array"
 import { Reactivity } from "effect/reactivity"
+import * as Payload from "../reactivity/Payload.ts"
 import type { Model } from "effect/schema"
 import { SqlClient, SqlModel } from "effect/sql"
 import type { SqlError } from "effect/sql"
@@ -151,22 +159,41 @@ export const make = <
       )
 
     // --- changes -------------------------------------------------------------
-    // Reactivity handlers take no arguments, so the change being announced is
-    // held here for the (synchronous) duration of the invalidation. A handler
-    // that runs without one was triggered by someone else. The invalidation
-    // runs right away even inside `Reactivity.withBatch`: a batched handler
-    // would run after `announcing` is cleared and only see a bare table signal.
+    // Reactivity handlers take no arguments, so the change rides along as the
+    // invalidation's payload, which handlers read while they (synchronously)
+    // run. A handler that runs without a decodable one was triggered by
+    // someone else. The invalidation runs right away even inside
+    // `Reactivity.withBatch`: a batched handler would run after the payload is
+    // gone and only see a bare table signal.
 
-    let announcing: Change<RowId> | undefined
+    const payloads = Option.getOrElse(
+      yield* Effect.serviceOption(Payload.InvalidationPayload),
+      () => Payload.local(reactivity)
+    )
+    const IdJson = Schema.toCodecJson(model.fields[options.idColumn] as Schema.Codec<RowId, unknown>)
+    const ChangeJson = Schema.Struct({
+      table: Schema.Literal(options.table),
+      change: Schema.Union([
+        Schema.TaggedStruct("Insert", { id: IdJson }),
+        Schema.TaggedStruct("Update", { id: IdJson, columns: Schema.Array(Schema.String) }),
+        Schema.TaggedStruct("Delete", { id: IdJson })
+      ])
+    })
+    const encodeChange = Schema.encodeSync(ChangeJson)
+    const decodeChange = Schema.decodeUnknownOption(ChangeJson)
+
     const announce = (change: Change<RowId>) =>
       Effect.sync(() => {
-        announcing = change
-        try {
-          reactivity.invalidateUnsafe({ [options.table]: [change.id] })
-        } finally {
-          announcing = undefined
-        }
+        const payload: Schema.Json = encodeChange({ table: options.table, change })
+        payloads.invalidateUnsafe({ [options.table]: [change.id] }, payload)
       })
+
+    /** Why this table's key was invalidated, from the current payload (local or remote). */
+    const tableSignal = (): Signal<RowId> => {
+      const payload = payloads.current()
+      const decoded = payload === undefined ? Option.none() : decodeChange(payload)
+      return Option.isSome(decoded) ? { _tag: "Change", change: decoded.value.change } : { _tag: "Table" }
+    }
 
     /** Columns whose stored (encoded) value differs between two versions of a row (all, if unknown). */
     const changedColumns = (before: Row | undefined, after: Row) =>
@@ -181,7 +208,10 @@ export const make = <
     const insert = (value: S["insert"]["Type"]) =>
       Effect.tap(base.insert(value), (row: Row) => announce({ _tag: "Insert", id: idOf(row) }))
 
-    /** Open live streams on this table. Without any, there is nobody to diff columns for. */
+    /**
+     * Open live streams on this table. Without any, there is nobody to diff
+     * columns for, unless other processes may be listening.
+     */
     let watchers = 0
 
     const update = (value: S["update"]["Type"]) =>
@@ -192,7 +222,7 @@ export const make = <
         // between its version and ours, it differs from the one we read in at
         // least one of them), and streams act on both.
         const id: RowId = value[options.idColumn]
-        const before = watchers === 0
+        const before = watchers === 0 && !payloads.crossProcess
           ? undefined
           : yield* base.findById(id).pipe(Effect.catchTag("NoSuchElementError", () => Effect.succeed(undefined)))
         const after = yield* base.update(value)
@@ -214,7 +244,7 @@ export const make = <
             (cancel) => Effect.sync(cancel)
           )
         // Registered before the first query, so no change can slip in between.
-        yield* register([options.table], () => (announcing ? { _tag: "Change", change: announcing } : { _tag: "Table" }))
+        yield* register([options.table], tableSignal)
         const dependsOn = liveOptions?.dependsOn ?? []
         if (dependsOn.length > 0) yield* register(dependsOn, () => ({ _tag: "Dependency" }))
 

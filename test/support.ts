@@ -3,7 +3,7 @@
  * talk to it like Datastar does.
  */
 import { NodeServices } from "@effect/platform-node"
-import { Layer } from "effect"
+import { type Duration, Layer } from "effect"
 import { HttpRouter, HttpServer } from "effect/http"
 import { afterAll } from "vitest"
 import { Infra, Routes } from "../src/app/App.tsx"
@@ -37,11 +37,20 @@ export const parseEvents = (body: string): Array<Event> =>
  * A fresh app with its own in-memory database (seeded unless `seed: false`).
  * Disposed after the test file.
  */
-export const makeApp = (options?: { readonly seed?: boolean }) => {
+export const makeApp = (options?: {
+  readonly seed?: boolean
+  /** Defaults to a private in-memory database. Pass a file to run several apps ("servers") on one database. */
+  readonly filename?: string
+  readonly pollInterval?: Duration.Input
+}) => {
   const { handler, dispose } = HttpRouter.toWebHandler(
     Routes.pipe(
       // provideMerge: the routes' per-request requirements are satisfied from the layer's outputs.
-      Layer.provideMerge(Infra({ filename: ":memory:", seed: options?.seed ?? true })),
+      Layer.provideMerge(Infra({
+        filename: options?.filename ?? ":memory:",
+        seed: options?.seed ?? true,
+        ...(options?.pollInterval === undefined ? {} : { pollInterval: options.pollInterval })
+      })),
       Layer.provide(HttpServer.layerServices),
       Layer.provide(NodeServices.layer)
     ),

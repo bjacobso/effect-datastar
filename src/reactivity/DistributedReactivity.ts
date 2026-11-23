@@ -14,6 +14,17 @@
  * commit for invalidations deferred inside a transaction. Inside
  * `withBatch`, keys are published when the batch ends, like the local handlers.
  *
+ * Payloads: the layer also provides `InvalidationPayload`. A payload given to
+ * its `invalidateUnsafe` is published with the keys, and while a received
+ * message's handlers run, `current()` returns that message's payload, exactly
+ * as it does for a local invalidation. What the payload means is up to the
+ * invalidator (e.g. `Repo` sends the row change); this module only carries it.
+ *
+ * Gaps: when the broadcast reports lost messages, every key that has a
+ * handler registered in this process is invalidated (without a payload), so
+ * every live query re-runs. Registrations are tracked for that purpose:
+ * `registerUnsafe`, `query` and `stream` are wrapped.
+ *
  * Only keys that survive JSON (strings, numbers, booleans) can cross processes;
  * others still invalidate locally, and are logged and skipped for publishing.
  */
@@ -21,8 +32,12 @@ import { Context, Effect, Layer, Queue, Schedule, Schema, type Scope, Stream } f
 import * as Arr from "effect/Array"
 import { Reactivity } from "effect/reactivity"
 import { Broadcast, type BroadcastError, type Invalidation, Keys } from "./Broadcast.ts"
+import { InvalidationPayload, type Keys as AnyKeys, makeSlot } from "./Payload.ts"
 
-type AnyKeys = Parameters<Reactivity.Reactivity["invalidate"]>[0]
+interface Outgoing {
+  readonly keys: AnyKeys
+  readonly payload?: Schema.Json | undefined
+}
 
 class PendingBroadcast extends Context.Service<PendingBroadcast, Array<AnyKeys>>()(
   "effect-datastar/reactivity/DistributedReactivity/PendingBroadcast"
@@ -30,22 +45,72 @@ class PendingBroadcast extends Context.Service<PendingBroadcast, Array<AnyKeys>>
 
 const isKeys = Schema.is(Keys)
 
-export const make: Effect.Effect<Reactivity.Reactivity, BroadcastError, Broadcast | Scope.Scope> = Effect.gen(
+/**
+ * Every key with a live registration, merged into (at most) two invalidations:
+ * one for list keys and one for record keys.
+ */
+const mergeKeys = (all: Iterable<AnyKeys>): ReadonlyArray<AnyKeys> => {
+  const list = new Set<unknown>()
+  const record = new Map<string, Set<unknown>>()
+  for (const keys of all) {
+    if (Array.isArray(keys)) {
+      for (const key of keys) list.add(key)
+    } else {
+      for (const [table, ids] of Object.entries(keys as Readonly<Record<string, ReadonlyArray<unknown>>>)) {
+        const set = record.get(table) ?? new Set()
+        for (const id of ids) set.add(id)
+        record.set(table, set)
+      }
+    }
+  }
+  const out: Array<AnyKeys> = []
+  if (list.size > 0) out.push([...list])
+  if (record.size > 0) out.push(Object.fromEntries([...record].map(([table, ids]) => [table, [...ids]])))
+  return out
+}
+
+export interface Distributed {
+  readonly reactivity: Reactivity.Reactivity
+  readonly payloads: InvalidationPayload["Service"]
+}
+
+export const make: Effect.Effect<Distributed, BroadcastError, Broadcast | Scope.Scope> = Effect.gen(
   function*() {
     const broadcast = yield* Broadcast
     const local = yield* Reactivity.make
     const origin = crypto.randomUUID()
-    const outbox = yield* Queue.unbounded<AnyKeys>()
-    const enqueue = (keys: AnyKeys) => {
-      Queue.offerUnsafe(outbox, keys)
+    const slot = makeSlot()
+    const outbox = yield* Queue.unbounded<Outgoing>()
+    const enqueue = (keys: AnyKeys, payload?: Schema.Json) => {
+      Queue.offerUnsafe(outbox, payload === undefined ? { keys } : { keys, payload })
     }
 
-    const publish = (batch: ReadonlyArray<AnyKeys>) =>
+    // --- registrations, for gaps ---------------------------------------------
+
+    const registered = new Set<{ readonly keys: AnyKeys }>()
+    const track = (keys: AnyKeys) => {
+      const entry = { keys }
+      registered.add(entry)
+      return () => {
+        registered.delete(entry)
+      }
+    }
+    const tracked = Effect.fnUntraced(function*(keys: AnyKeys) {
+      yield* Effect.acquireRelease(Effect.sync(() => track(keys)), (untrack) => Effect.sync(untrack))
+    })
+    /** Re-run everything registered in this process; nothing is published. */
+    const invalidateRegisteredUnsafe = () => {
+      for (const keys of mergeKeys([...registered].map((r) => r.keys))) slot.run(undefined, () => local.invalidateUnsafe(keys))
+    }
+
+    // --- publishing ------------------------------------------------------------
+
+    const publish = (batch: ReadonlyArray<Outgoing>) =>
       Effect.gen(function*() {
         const messages: Array<Invalidation> = []
-        for (const keys of batch) {
-          if (isKeys(keys)) messages.push({ origin, keys })
-          else yield* Effect.logWarning("Reactivity keys can't be broadcast (not JSON primitives)", keys)
+        for (const { keys, payload } of batch) {
+          if (!isKeys(keys)) yield* Effect.logWarning("Reactivity keys can't be broadcast (not JSON primitives)", keys)
+          else messages.push(payload === undefined ? { origin, keys } : { origin, keys, payload })
         }
         if (Arr.isReadonlyArrayNonEmpty(messages)) yield* broadcast.publish(messages)
       }).pipe(
@@ -59,18 +124,29 @@ export const make: Effect.Effect<Reactivity.Reactivity, BroadcastError, Broadcas
     yield* Effect.addFinalizer(() => Effect.flatMap(Queue.clear(outbox), publish))
     yield* Queue.takeAll(outbox).pipe(Effect.flatMap(publish), Effect.forever, Effect.forkScoped)
 
+    // --- receiving -------------------------------------------------------------
+
     // Subscribe before the layer is ready, so nothing published after startup is missed.
     const incoming = yield* broadcast.subscribe
     yield* incoming.pipe(
-      Stream.runForEach((message) =>
-        Effect.sync(() => {
-          if (message.origin !== origin) local.invalidateUnsafe(message.keys)
+      Stream.runForEach((received) => {
+        if (received._tag === "Gap") {
+          return Effect.andThen(
+            Effect.logWarning(`Missed ${received.missed} invalidation(s); re-running every live query`),
+            Effect.sync(invalidateRegisteredUnsafe)
+          )
+        }
+        const message = received.invalidation
+        return Effect.sync(() => {
+          if (message.origin !== origin) slot.run(message.payload, () => local.invalidateUnsafe(message.keys))
         })
-      ),
+      }),
       Effect.tapCause((cause) => Effect.logWarning("Invalidation subscription failed; retrying", cause)),
       Effect.retry(Schedule.spaced("1 second")),
       Effect.forkScoped
     )
+
+    // --- the wrapped Reactivity ------------------------------------------------
 
     const invalidateUnsafe = (keys: AnyKeys): void => {
       local.invalidateUnsafe(keys)
@@ -89,21 +165,49 @@ export const make: Effect.Effect<Reactivity.Reactivity, BroadcastError, Broadcas
       Effect.suspend(() => {
         const pending: Array<AnyKeys> = []
         return local.withBatch(Effect.provideService(effect, PendingBroadcast, pending)).pipe(
-          Effect.ensuring(Effect.sync(() => pending.forEach(enqueue)))
+          Effect.ensuring(Effect.sync(() => pending.forEach((keys) => enqueue(keys))))
         )
       })
 
-    return Reactivity.Reactivity.of({
+    const registerUnsafe = (keys: AnyKeys, handler: () => void): () => void => {
+      const untrack = track(keys)
+      const cancel = local.registerUnsafe(keys, handler)
+      return () => {
+        untrack()
+        cancel()
+      }
+    }
+
+    const reactivity = Reactivity.Reactivity.of({
       ...local,
       invalidateUnsafe,
       invalidate,
       mutation: (keys, effect) => Effect.tap(effect, invalidate(keys)),
-      withBatch
+      withBatch,
+      registerUnsafe,
+      query: (keys, effect) => Effect.andThen(tracked(keys), local.query(keys, effect)),
+      stream: (keys, effect) => Stream.unwrap(Effect.as(tracked(keys), local.stream(keys, effect)))
     })
+
+    const payloads = InvalidationPayload.of({
+      invalidateUnsafe: (keys, payload) => {
+        slot.run(payload, () => local.invalidateUnsafe(keys))
+        enqueue(keys, payload)
+      },
+      current: slot.current,
+      crossProcess: true
+    })
+
+    return { reactivity, payloads }
   }
 )
 
-/** `Reactivity` across processes. Requires a `Broadcast` (e.g. `SqliteBroadcast.layer`). */
-export const layer: Layer.Layer<Reactivity.Reactivity, BroadcastError, Broadcast> = Layer.effect(
-  Reactivity.Reactivity
-)(make)
+/**
+ * `Reactivity` across processes, plus `InvalidationPayload` for invalidations
+ * that say what changed. Requires a `Broadcast` (e.g. `SqliteBroadcast.layer`).
+ */
+export const layer: Layer.Layer<Reactivity.Reactivity | InvalidationPayload, BroadcastError, Broadcast> = Layer
+  .effectContext(
+    Effect.map(make, ({ payloads, reactivity }) =>
+      Context.make(Reactivity.Reactivity, reactivity).pipe(Context.add(InvalidationPayload, payloads)))
+  )
