@@ -114,6 +114,15 @@ export interface Config<
   readonly layout: Layout
 }
 
+/** A resource's constraint-violation messages, resolved (see `Config["messages"]`). */
+export interface Messages {
+  /** Field -> message for unique constraints. */
+  readonly unique: Readonly<Partial<Record<string, string>>>
+  /** Field -> message for foreign key violations (relations get a default). */
+  readonly invalidReference: Readonly<Partial<Record<string, string>>>
+  readonly deleteRestricted: string | undefined
+}
+
 /** A server-rendered section of the detail page. Failures must be handled (rendered) first. */
 export type Section<R> = Effect.Effect<JSX.Element, never, R>
 
@@ -842,7 +851,16 @@ export const make = <
 
   return {
     name,
+    noun: config.noun,
+    model,
+    idColumn,
     query,
+    /** Error messages for database constraint violations, with the defaults for relations filled in. */
+    messages: {
+      unique: config.messages?.unique ?? {},
+      invalidReference,
+      deleteRestricted: config.messages?.deleteRestricted
+    } as Messages,
     signals: list.signals,
     /** Repository service for this resource. */
     Repo: RepoTag,

@@ -5,6 +5,7 @@ import { type Duration, Layer } from "effect"
 import { HttpRouter, HttpServerResponse, HttpStaticServer } from "effect/http"
 import * as DistributedReactivity from "../reactivity/DistributedReactivity.ts"
 import * as SqliteBroadcast from "../reactivity/SqliteBroadcast.ts"
+import { ApiRoutes } from "./Api.ts"
 import * as Db from "./Db.ts"
 import { TeamMembers, TeamRoutes } from "./TeamDetail.tsx"
 import { Teams } from "./Teams.tsx"
@@ -16,6 +17,8 @@ export const Routes = Layer.mergeAll(
   Users.routes,
   TeamRoutes,
   TeamMembers.routes,
+  // JSON API under /api, through the same repos (so it updates live views too).
+  ApiRoutes,
   HttpStaticServer.layer({ root: "public" })
 )
 

@@ -39,6 +39,16 @@ export interface ListQuery<Sortable extends string, FilterKey extends string> {
   readonly filters: { readonly [K in FilterKey]: string }
 }
 
+/** A list query as flat, optional params (see `QueryDef.params`). */
+export type ListParams<Sortable extends string, FilterKey extends string> =
+  & {
+    readonly page?: number
+    readonly pageSize?: number
+    readonly sort?: Sortable
+    readonly dir?: Dir
+  }
+  & { readonly [K in FilterKey]?: string }
+
 export interface FilterInfo extends Field.FieldInfo {
   readonly operator: Operator
 }
@@ -64,6 +74,15 @@ export interface QueryDef<Sortable extends string, FilterKey extends string> {
   readonly toSearchParams: (q: ListQuery<Sortable, FilterKey>) => URLSearchParams
   /** Query from URL search params. Lenient: invalid or unknown params fall back to defaults. */
   readonly fromSearchParams: (params: URLSearchParams) => ListQuery<Sortable, FilterKey>
+  /**
+   * The query as flat, optional params with the URL-state names (`page`,
+   * `pageSize`, `sort`, `dir` and one per filter), validated strictly with the
+   * same per-field schemas as the signals. For APIs, where an invalid param
+   * should be an error rather than a silent default.
+   */
+  readonly params: Schema.Codec<ListParams<Sortable, FilterKey>, ListParams<Sortable, FilterKey>>
+  /** Params -> query: missing params take their defaults. */
+  readonly fromParams: (params: ListParams<Sortable, FilterKey>) => ListQuery<Sortable, FilterKey>
   /**
    * The same query with one `eq` filter fixed by the server (e.g. a "has many"
    * view locked to `teamId = 3`). The client-facing schema drops that filter and
@@ -246,6 +265,22 @@ export const make = <
     initial,
     toSearchParams,
     fromSearchParams,
+    params: Schema.Struct({
+      page: Schema.optionalKey(pieces.page),
+      pageSize: Schema.optionalKey(pieces.pageSize),
+      sort: Schema.optionalKey(pieces.sort),
+      dir: Schema.optionalKey(pieces.dir),
+      ...Object.fromEntries(filters.map((f) => [f.key, Schema.optionalKey(filterSchemas[f.key]!)]))
+    }) as unknown as QueryDef<Sortable, FK>["params"],
+    fromParams: (p) => ({
+      page: p.page ?? initial.page,
+      pageSize: p.pageSize ?? initial.pageSize,
+      sort: p.sort ?? initial.sort,
+      dir: p.dir ?? initial.dir,
+      filters: Object.fromEntries(
+        filters.map((f) => [f.key, (p as Readonly<Record<string, unknown>>)[f.key] ?? ""])
+      ) as ListQuery<Sortable, FK>["filters"]
+    }),
     sortable: config.sortable,
     pageSizes: config.pageSizes,
     filters,
