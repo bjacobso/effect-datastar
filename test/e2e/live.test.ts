@@ -177,4 +177,25 @@ describe("live updates across tabs", () => {
     await users.close()
     await teams.close()
   })
+
+  it("renaming a user in one tab patches that row in another", async () => {
+    const editor = await open("/users")
+    const viewer = await open("/users")
+    const warnings: Array<string> = []
+    viewer.on("console", (m) => m.type() === "warning" && warnings.push(m.text()))
+    const row = (page: Page) => page.locator("tbody tr").first()
+    const id = await row(viewer).getAttribute("id")
+
+    await row(editor).locator("button", { hasText: "Edit" }).click()
+    await expect.poll(() => editor.locator("dialog[open]").count()).toBe(1)
+    await editor.fill("dialog input[type=text]", "Row Patched")
+    await editor.locator("dialog button[type=submit]").click()
+
+    await expect.poll(() => row(viewer).locator("td").first().innerText()).toBe("Row Patched")
+    expect(await row(viewer).getAttribute("id")).toBe(id)
+    expect(await total(viewer).innerText()).toBe("87 total")
+    expect([...editor.errors, ...viewer.errors, ...warnings]).toEqual([])
+    await editor.close()
+    await viewer.close()
+  })
 })

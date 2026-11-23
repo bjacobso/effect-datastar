@@ -120,11 +120,23 @@ export const makeApp = (options?: { readonly seed?: boolean }) => {
       }
       return events
     }
+    /** Every message that arrives within `ms` (possibly none). */
+    const collect = async (ms: number) => {
+      const events: Array<Event> = []
+      const deadline = Date.now() + ms
+      while (Date.now() < deadline) {
+        const r = await read(Math.max(1, deadline - Date.now()))
+        if (r === "timeout" || r.done) break
+        buffer += decoder.decode(r.value, { stream: true })
+        events.push(...drain())
+      }
+      return events
+    }
     const close = () => {
       controller.abort()
       return reader.cancel().catch(() => {})
     }
-    return { response, until, close }
+    return { response, until, collect, close }
   }
 
   const page = async (path: string) => (await handler(new Request(url(path)))).text()
