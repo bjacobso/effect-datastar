@@ -64,7 +64,7 @@ describe("live updates across server processes", () => {
     const latency = await timeUntil(submitted, async () => (await total(onB).innerText()) === "88 total")
     console.log(`cross-process latency (create user, click to other tab updated): ${latency} ms`)
     // Newest first: the new user tops the default sort.
-    await expect.poll(() => onB.locator("tbody tr td:first-child").first().innerText()).toBe("Cross Process")
+    await expect.poll(() => onB.locator("tbody tr td:nth-child(2)").first().innerText()).toBe("Cross Process")
     expect(await total(onA).innerText()).toBe("88 total")
 
     expect([...onA.errors, ...onB.errors]).toEqual([])
@@ -76,7 +76,7 @@ describe("live updates across server processes", () => {
     const teams = await open(a, "/teams")
     const users = await open(b, "/users")
     await users.locator("#users-filter-teamId").selectOption({ label: "Design" })
-    await expect.poll(() => users.locator("tbody tr td:nth-child(4)").first().innerText()).toBe("Design")
+    await expect.poll(() => users.locator("tbody tr td:nth-child(5)").first().innerText()).toBe("Design")
 
     await teams.locator("tbody tr", { hasText: "Design" }).locator("button", { hasText: "Edit" }).click()
     await dialog(teams).locator("input[type=text]").fill("Design Systems")
@@ -85,7 +85,7 @@ describe("live updates across server processes", () => {
 
     const latency = await timeUntil(
       submitted,
-      async () => (await users.locator("tbody tr td:nth-child(4)").first().innerText()) === "Design Systems"
+      async () => (await users.locator("tbody tr td:nth-child(5)").first().innerText()) === "Design Systems"
     )
     console.log(`cross-process latency (rename team, click to other tab updated): ${latency} ms`)
     await expect.poll(() =>

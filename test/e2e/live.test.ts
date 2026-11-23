@@ -43,7 +43,7 @@ afterAll(async () => {
 })
 
 const open = (path: string) => openTab(browser, base + path)
-const teamColumn = (page: Page) => page.locator("tbody tr td:nth-child(4)").first()
+const teamColumn = (page: Page) => page.locator("tbody tr td:nth-child(5)").first()
 const filterText = (page: Page, id: string) =>
   page.locator(id).evaluate((s: HTMLSelectElement) => s.selectedOptions[0]!.text)
 
@@ -263,7 +263,7 @@ describe("live updates across tabs", () => {
     await dialog(editor).locator("input[type=text]").fill("Row Patched")
     await save(editor)
 
-    await expect.poll(() => row(viewer).locator("td").first().innerText()).toBe("Row Patched")
+    await expect.poll(() => row(viewer).locator("td").nth(1).innerText()).toBe("Row Patched")
     expect(await row(viewer).getAttribute("id")).toBe(id)
     expect(await total(viewer).innerText()).toBe("87 total")
     expect([...editor.errors, ...viewer.errors, ...warnings]).toEqual([])
@@ -304,7 +304,7 @@ describe("team detail page", () => {
     // A users tab sees the new member in Support, and its team cell links back.
     const users = await open("/users?name=Embedded")
     await expect.poll(() => teamColumn(users).innerText()).toBe("Support")
-    expect(await users.locator("tbody tr td:nth-child(4) a").getAttribute("href")).toBe("/teams/5")
+    expect(await users.locator("tbody tr td:nth-child(5) a").getAttribute("href")).toBe("/teams/5")
 
     // Rename the team from the teams page: the detail page and the users tab follow.
     const teams = await open("/teams")

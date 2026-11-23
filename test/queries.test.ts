@@ -60,6 +60,11 @@ describe("SQL statements per mutation", () => {
     await measure("insert", () => app.action("POST", "/users", userDraft({ name: "New", email: "new@example.com" })))
     await measure("delete", () => app.action("DELETE", "/users/88"))
     await measure("rename team", () => app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth Eng" } } }))
+    const bulk = (path: string, users: Record<string, unknown>) => () => app.action("POST", path, { users })
+    // Users 84-82 are on page 1 of the default list, none is in team 4.
+    await measure("bulk set team, 3 users", bulk("/users/bulk/update", { selection: [84, 83, 82], bulk: { field: "teamId", value: "4" } }))
+    await measure("bulk set role, 3 users", bulk("/users/bulk/update", { selection: [84, 83, 82], bulk: { field: "role", value: "guest" } }))
+    await measure("bulk delete, 3 users", bulk("/users/bulk/delete", { selection: [84, 83, 82] }))
 
     await Promise.all(streams.map((s) => s.close()))
     expect(Object.fromEntries(results.map((r) => [r.mutation, r.statements]))).toEqual({
@@ -77,7 +82,16 @@ describe("SQL statements per mutation", () => {
       // read previous version + update + page query, COUNT and team lookup per view. No teams
       // view is open here, but the previous version is read anyway: views in other
       // processes may need the changed columns (they travel with the broadcast).
-      "rename team": 20
+      "rename team": 20,
+      // One transaction (BEGIN, read the rows, one UPDATE, COMMIT) and one invalidation for the
+      // three: page 1 re-fetches its visible rows once (1), the team-filtered view re-queries (2).
+      // Three single updates would be 3 × 5.
+      "bulk set team, 3 users": 7,
+      // The same, with the role-filtered view re-querying instead.
+      "bulk set role, 3 users": 7,
+      // BEGIN, read the rows, a savepoint + DELETE + release per row, COMMIT (12); then one
+      // page query and COUNT per view (12). Three single deletes would be 3 × 13.
+      "bulk delete, 3 users": 24
     })
   })
 })

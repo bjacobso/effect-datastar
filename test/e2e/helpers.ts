@@ -49,7 +49,7 @@ export const open = async (browser: Browser, url: string): Promise<Tab> => {
 
 export const total = (page: Page) => page.locator("[data-total]").first()
 export const pageText = (page: Page) => page.locator("[data-page]").first()
-export const firstColumn = (page: Page) => page.locator("tbody tr td:first-child").allInnerTexts()
+export const firstColumn = (page: Page) => page.locator("tbody tr td:nth-child(2)").allInnerTexts()
 export const sortBy = (page: Page, label: string) => page.locator("th button", { hasText: label }).click()
 
 /** The create/edit dialog island while open (its host has `open` while the `dialog` signal is true). */

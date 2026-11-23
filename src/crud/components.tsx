@@ -23,6 +23,7 @@ import { color, font, motion, radius, shadow, size, space } from "../ui/theme/to
 import type * as Field from "./Field.ts"
 import type { Option } from "./Lookup.ts"
 import { type FilterInfo, NULL } from "./Query.ts"
+import * as UrlState from "./UrlState.ts"
 
 const at = (base: SignalPath, ...rest: Array<string>) => [base, ...rest].join(".") as SignalPath
 const ref = (path: SignalPath) => `$${path}`
@@ -32,7 +33,7 @@ const str = (s: string) => `'${s.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
  * Options for a field: from a lookup (relations) when given, otherwise derived
  * from the schema (enum members / yes-no).
  */
-const fieldOptions = (field: Field.FieldInfo, lookup?: ReadonlyArray<Option>): ReadonlyArray<Option> =>
+export const fieldOptions = (field: Field.FieldInfo, lookup?: ReadonlyArray<Option>): ReadonlyArray<Option> =>
   lookup ?? (field.kind === "boolean"
     ? [{ value: "true", label: "Yes" }, { value: "false", label: "No" }]
     : field.options.map((o) => ({ value: o, label: o })))
@@ -87,7 +88,8 @@ export const FilterBar = (props: {
                 placeholder={`Search ${f.label.toLowerCase()}…`}
                 {...ds.merge(
                   ds.bind(at(props.query, "filters", f.key)),
-                  ds.on("input", `${ref(at(props.query, "page"))} = 1`)
+                  ds.on("input", `${ref(at(props.query, "page"))} = 1; ${UrlState.typing(props.prefix).input}`),
+                  ds.on("blur", UrlState.typing(props.prefix).blur)
                 )}
                 {...stylex.props(shared.control, styles.searchInput)}
               />
@@ -159,14 +161,22 @@ export interface Column<A> {
   readonly render?: ((row: A) => ReactNode) | undefined
 }
 
+/** A leading checkbox column (bulk selection): the header cell and each row's. */
+export interface Select<A> {
+  readonly header: ReactNode
+  readonly cell: (row: A) => ReactNode
+}
+
 /** One `<tr>`, with a stable id so a live view can patch just this row. */
 export const TableRow = <A extends object>(props: {
   readonly row: A
   readonly columns: ReadonlyArray<Column<A>>
   readonly rowId: (row: A) => string
   readonly actions?: ((row: A) => ReactNode) | undefined
+  readonly select?: Select<A> | undefined
 }) => (
   <tr id={props.rowId(props.row)} {...stylex.props(styles.tr)}>
+    {props.select && <td {...stylex.props(styles.td, styles.check)}>{props.select.cell(props.row)}</td>}
     {props.columns.map((c) => (
       <td key={c.field.key} {...stylex.props(styles.td)}>
         {c.render
@@ -186,11 +196,13 @@ export const Table = <A extends object>(props: {
   readonly query: SignalPath
   readonly current: { readonly sort: string; readonly dir: "asc" | "desc" }
   readonly actions?: ((row: A) => ReactNode) | undefined
+  readonly select?: Select<A> | undefined
 }) => (
   <div {...stylex.props(styles.scroll)}>
     <table id={props.id} {...stylex.props(styles.table)}>
       <thead>
         <tr>
+          {props.select && <th {...stylex.props(styles.th, styles.check)}>{props.select.header}</th>}
           {props.columns.map((c) =>
             c.sortable
               ? <SortHeader key={c.field.key} field={c.field} query={props.query} current={props.current} />
@@ -203,13 +215,20 @@ export const Table = <A extends object>(props: {
         {props.rows.length === 0
           ? (
             <tr>
-              <td colSpan={props.columns.length + 1} {...stylex.props(styles.td, styles.empty)}>
+              <td colSpan={props.columns.length + 1 + (props.select ? 1 : 0)} {...stylex.props(styles.td, styles.empty)}>
                 Nothing matches these filters.
               </td>
             </tr>
           )
           : props.rows.map((row) => (
-            <TableRow key={props.rowId(row)} row={row} columns={props.columns} rowId={props.rowId} actions={props.actions} />
+            <TableRow
+              key={props.rowId(row)}
+              row={row}
+              columns={props.columns}
+              rowId={props.rowId}
+              actions={props.actions}
+              select={props.select}
+            />
           ))}
       </tbody>
     </table>
@@ -527,6 +546,7 @@ const styles = stylex.create({
     verticalAlign: "middle"
   },
   actions: { textAlign: "end", whiteSpace: "nowrap", paddingBlock: "6px" },
+  check: { width: "1%", paddingInlineEnd: 0, lineHeight: 0 },
   rowActions: { display: "inline-flex", gap: space["--dw-space-1"] },
   dangerText: { color: { default: color["--dw-danger"], ":hover": color["--dw-danger"] } },
   empty: { textAlign: "center", color: color["--dw-text-muted"], paddingBlock: space["--dw-space-10"] },

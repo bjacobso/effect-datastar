@@ -17,7 +17,8 @@ export const Teams = Resource.define({
   },
   messages: {
     unique: { name: "A team with that name already exists" },
-    deleteRestricted: "This team still has members. Move them first."
+    deleteRestricted: "This team still has members. Move them first.",
+    bulkDeleteRestricted: (n) => `${n} ${n === 1 ? "has" : "have"} members`
   },
   layout: Layout
 })

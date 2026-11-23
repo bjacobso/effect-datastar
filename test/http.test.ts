@@ -84,7 +84,8 @@ describe("users live view", () => {
     const none = await view(usersQuery({}, { teamId: "null" }))
     await none.close()
     expect(total(table(none.first))).toBe(14)
-    expect(table(none.first)).not.toContain("Growth")
+    // No row shows a team (the bulk bar above the rows still offers every team).
+    expect(table(none.first).split(`id="users-rows"`)[1]).not.toContain("Growth")
   })
 
   it("sorts and pages", async () => {
@@ -99,7 +100,11 @@ describe("users live view", () => {
   it("sends the canonical URL once per stream", async () => {
     const s = await view(usersQuery({ sort: "name", dir: "asc" }, { role: "admin" }))
     await s.close()
-    expect(signals(s.first)).toEqual([{ users: { _url: "/users?role=admin&sort=name&dir=asc" } }])
+    const [local] = signals(s.first)
+    expect(signals(s.first)).toHaveLength(1)
+    expect(local.users._url).toBe("/users?role=admin&sort=name&dir=asc")
+    // With the ids on the page, for the bulk selection.
+    expect(local.users._page).toHaveLength(10)
   })
 
   it("clamps an out-of-range page by patching the query signal", async () => {

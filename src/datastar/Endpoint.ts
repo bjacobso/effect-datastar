@@ -40,6 +40,11 @@ export interface CallOptions {
   readonly openWhenHidden?: boolean | undefined
   /** Search params appended to the URL (`?embed=members&scope=2`). */
   readonly search?: Readonly<Record<string, string>> | undefined
+  /**
+   * A client-side expression for the whole search string, appended to the URL as is
+   * (e.g. `location.search`). Instead of `search`.
+   */
+  readonly searchExpr?: Expr | undefined
 }
 
 export interface Endpoint<P extends string, R, Prefix extends string = ""> {
@@ -72,7 +77,8 @@ export const make = <const P extends HttpRouter.PathInput | "", R, const Prefix 
     if (include) opts.push(`filterSignals: {include: ${includeRegex(include)}}`)
     if (callOptions?.openWhenHidden) opts.push(`openWhenHidden: true`)
     const args = opts.length > 0 ? `, {${opts.join(", ")}}` : ""
-    return `@${method.toLowerCase()}('${url}'${args})`
+    const target = callOptions?.searchExpr === undefined ? `'${url}'` : `'${url}' + (${callOptions.searchExpr})`
+    return `@${method.toLowerCase()}(${target}${args})`
   }
   return {
     method,

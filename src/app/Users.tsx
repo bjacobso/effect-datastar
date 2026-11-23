@@ -19,5 +19,7 @@ export const Users = Resource.define({
     unique: { email: "Email is already taken" },
     invalidReference: { teamId: "That team no longer exists" }
   },
+  // Bulk actions on the selected rows: Delete, plus "Set role…" and "Set team…".
+  bulk: { set: ["role", "teamId"] },
   layout: Layout
 })

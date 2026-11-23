@@ -76,7 +76,8 @@ describe("team detail page", () => {
     expect(html).not.toContain("history.replaceState")
     const s = await members(2, membersQuery({ sort: "name", dir: "asc" }))
     await s.close()
-    expect(signals(s.first)).toEqual([])
+    // Only the ids on the page (bulk selection), no `_url`.
+    expect(signals(s.first)).toEqual([{ members: { _page: expect.any(Array) } }])
   })
 
   it("returns 404 for unknown and malformed ids", async () => {

@@ -29,6 +29,9 @@
  *   DELETE /users/:id          delete
  *   GET    /users/:id          detail page (fields, Edit, Delete, sections)
  *   GET    /users/:id/view     live record
+ *   POST   /users/bulk/delete  delete the selected rows
+ *   POST   /users/bulk/update  set one field on the selected rows
+ *   GET    /users/query        the query signals for a URL (Back/Forward)
  *
  * An embed (the users table on a team's page, with `teamId` locked) uses the
  * same table routes, with `?embed=members&scope=3`. The server looks up the
@@ -56,6 +59,7 @@ import { Button } from "../ui/Button.tsx"
 import { Alert, Card, EmptyState, Skeleton } from "../ui/display.tsx"
 import { Icon } from "../ui/icons.tsx"
 import { color, font, space } from "../ui/theme/tokens.stylex.ts"
+import * as Bulk from "./Bulk.tsx"
 import * as Components from "./components.tsx"
 import type * as Field from "./Field.ts"
 import { toast, unexpected } from "./Feedback.tsx"
@@ -63,6 +67,7 @@ import * as Form from "./Form.ts"
 import * as Lookup from "./Lookup.ts"
 import * as Query from "./Query.ts"
 import * as Repo from "./Repo.ts"
+import * as UrlState from "./UrlState.ts"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -137,7 +142,14 @@ export interface Config<
     readonly invalidReference?: { readonly [K in FormKey<M>]?: string }
     /** Toast when a delete is rejected because other rows still reference this one. */
     readonly deleteRestricted?: string
+    /** For a bulk delete's toast: `n` rows the database kept ("2 deleted, 1 has members"). */
+    readonly bulkDeleteRestricted?: (n: number) => string
   }
+  /**
+   * Bulk actions on the selected rows. Delete is always there; `set` adds a
+   * "Set <field>…" control per form field (e.g. `["role", "teamId"]`).
+   */
+  readonly bulk?: { readonly set?: ReadonlyArray<FormKey<M>> }
   /** Custom table cells. */
   readonly columns?: { readonly [K in Fields<M>]?: (row: M["Type"], lookups: Components.Lookups) => ReactNode }
   /** Columns not shown in the table (default: the id). */
@@ -152,6 +164,8 @@ export interface Messages {
   /** Field -> message for foreign key violations (relations get a default). */
   readonly invalidReference: Readonly<Partial<Record<string, string>>>
   readonly deleteRestricted: string | undefined
+  /** `n` rows a bulk delete couldn't remove because they are still referenced. */
+  readonly bulkDeleteRestricted: (n: number) => string
 }
 
 /** A server-rendered section of the detail page. Failures must be handled (rendered) first. */
@@ -211,6 +225,12 @@ interface AnySpec {
   readonly "~requires"?: unknown
 }
 
+/** A bulk update's value is not a valid value of its field. */
+class BulkValueError extends Data.TaggedError("BulkValueError")<{ readonly label: string }> {}
+
+/** The most rows one bulk action takes (a page is at most the largest page size). */
+const MAX_SELECTION = 500
+
 /** The search params that pick an embed's table (`?embed=members&scope=3`) or the detail page (`?from=detail`). */
 const EMBED = "embed"
 const SCOPE = "scope"
@@ -250,6 +270,12 @@ export const define = <
   const IdSchema = model.fields[idColumn] as unknown as Schema.Codec<IdType, number>
   const IdParams = Schema.Struct({ id: Schema.NumberFromString.pipe(Schema.decodeTo(IdSchema)) })
   const readId = Effect.map(HttpRouter.schemaPathParams(IdParams), (p) => p.id)
+  // Row ids as signals hold them (the id field's encoded form), for the bulk selection.
+  const IdsSchema = Schema.Array(IdSchema)
+  const SelectionSchema = IdsSchema.check(Schema.isMinLength(1), Schema.isMaxLength(MAX_SELECTION))
+  const encodeId = Schema.encodeSync(IdSchema)
+  const encodeIds = Schema.encodeSync(IdsSchema)
+  const pageIds = (rows: ReadonlyArray<Row>) => encodeIds(rows.map((row) => row[idColumn]))
   const get = (row: Row, key: string): unknown => (row as Record<string, unknown>)[key]
   const label = (row: Row) => String(get(row, config.display))
   const href = (id: IdType) => `/${name}/${encodeURIComponent(String(id))}`
@@ -305,7 +331,8 @@ export const define = <
         ),
         ...config.messages?.invalidReference
       },
-      deleteRestricted: config.messages?.deleteRestricted
+      deleteRestricted: config.messages?.deleteRestricted,
+      bulkDeleteRestricted: config.messages?.bulkDeleteRestricted ?? ((n) => `${n} still referenced elsewhere`)
     }
     const goneToast = () => Effect.succeed(toast(`That ${config.noun} no longer exists`, "error"))
 
@@ -353,6 +380,8 @@ export const define = <
       readonly edit: (id: IdType, lock: Lock) => Effect.Effect<Events, never, Req>
       /** `deleted`: the events to send once the row is gone. */
       readonly remove: (id: IdType, lock: Lock, deleted: Events) => Effect.Effect<Events, never, Req>
+      readonly bulkRemove: (lock: Lock) => Effect.Effect<Events, never, Req>
+      readonly bulkUpdate: (lock: Lock) => Effect.Effect<Events, never, Req>
     }
     interface Locked {
       readonly table: Table
@@ -421,6 +450,30 @@ export const define = <
       { prefix, include: [] }
     )
 
+    /** Bulk delete / update of the selection (`?embed=&scope=` picks the table and its lock). */
+    const bulkRemove = Endpoint.make(
+      "POST",
+      "/bulk/delete",
+      Effect.flatMap(target, (t) => t.table.bulkRemove(t.lock)).pipe(Effect.catchTag("ScopeError", unexpected)),
+      { prefix }
+    )
+    const bulkUpdate = Endpoint.make(
+      "POST",
+      "/bulk/update",
+      Effect.flatMap(target, (t) => t.table.bulkUpdate(t.lock)).pipe(Effect.catchTag("ScopeError", unexpected)),
+      { prefix }
+    )
+    /**
+     * The query of a list URL, as signals (`GET /users/query?teamId=3&sort=name`),
+     * parsed exactly as the page parses it. Back/Forward use it (see `UrlState`).
+     */
+    const restore = Endpoint.make(
+      "GET",
+      "/query",
+      Effect.map(searchParams, (params) => Datastar.patchSignals({ [name]: { query: query.fromSearchParams(params) } })),
+      { prefix, include: [] }
+    )
+
     // --- a table -----------------------------------------------------------
     //
     // The list page and every embed share this: a filter bar, live table,
@@ -458,11 +511,33 @@ export const define = <
       const scopedRelations = relations.filter(([k]) => k !== lockKey)
 
       const editorSchema = { draft: draftSchema, errors: Form.errorsSchema(form), dialog: Schema.Boolean }
-      const signals = ds.make(Schema.Struct({ [ns]: Schema.Struct({ query: options.query.schema, ...editorSchema }) }))
+      // Bulk selection (see `Bulk`) and, for the table that owns the URL, history state (see `UrlState`).
+      const bulkSchema = {
+        selection: IdsSchema,
+        bulk: Schema.Struct({ field: Schema.String, value: Schema.String }),
+        _page: IdsSchema,
+        _url: Schema.optionalKey(Schema.String),
+        _nav: Schema.optionalKey(Schema.String),
+        _typing: Schema.optionalKey(Schema.Boolean),
+        _pushed: Schema.optionalKey(Schema.Boolean)
+      }
+      const signals = ds.make(
+        Schema.Struct({ [ns]: Schema.Struct({ query: options.query.schema, ...editorSchema, ...bulkSchema }) })
+      )
       const editorSignals = ds.make(Schema.Struct({ [ns]: Schema.Struct(editorSchema) }))
       const path = (...parts: Array<string>) => [ns, ...parts].join(".") as SignalPath
       const $ = (...parts: Array<string>) => `$${path(...parts)}`
       const search = (lock: Lock) => (lock === undefined ? undefined : { [EMBED]: ns, [SCOPE]: lock })
+      const bulkPaths: Bulk.Paths = {
+        selection: path("selection"),
+        page: path("_page"),
+        field: path("bulk", "field"),
+        value: path("bulk", "value")
+      }
+      /** The fields "Set <field>…" offers (not the lock: an embed's rows keep it). */
+      const setFields = (config.bulk?.set ?? []).flatMap((key) =>
+        key === lockKey ? [] : fields.filter((f) => f.key === key)
+      )
 
       const readQuery = Effect.map(readSignals(ns, Schema.Struct({ query: options.query.schema })), (s) => s.query)
       const readDraft = Effect.map(readSignals(ns, Schema.Struct({ draft: draftSchema })), (s) => s.draft)
@@ -566,10 +641,14 @@ export const define = <
                 lastOptions = key
                 events.push(...relationSelects(lookups))
               }
+              // The ids on this page, for "select all" and pruning the selection (see `Bulk`),
+              // and once per stream the canonical URL (see `UrlState`).
+              const local: Record<string, unknown> = { _page: pageIds(page.rows) }
               if (options.syncUrl && !urlSent) {
                 urlSent = true
-                events.push(Datastar.patchSignals({ [ns]: { _url: urlFor(full) } }))
+                local["_url"] = urlFor(full)
               }
+              events.push(Datastar.patchSignals({ [ns]: local }))
               return events
             })
           )
@@ -624,6 +703,63 @@ export const define = <
           })
         )
 
+      const readSelection = readSignals(ns, Schema.Struct({ selection: SelectionSchema }))
+      const readBulkUpdate = readSignals(
+        ns,
+        Schema.Struct({ selection: SelectionSchema, bulk: Schema.Struct({ field: Schema.String, value: Schema.String }) })
+      )
+      const only = (lock: Lock) => (row: Row) => inScope(row, lock)
+      /** After a bulk action: the toast, and the selection that is left (`[]` unless something was kept). */
+      const bulkDone = (summary: { readonly message: string; readonly kind: "ok" | "error" }, keep: ReadonlyArray<IdType>) => [
+        toast(summary.message, summary.kind),
+        Datastar.patchSignals({ [ns]: { selection: encodeIds(keep) } })
+      ]
+      const badSelection = () => Effect.succeed(toast("Select at least one row", "error"))
+
+      /** Delete the selection in one transaction. Rows the database keeps (references) stay selected. */
+      const bulkRemoveRows = (lock: Lock) =>
+        Effect.gen(function*() {
+          const repo = yield* RepoTag
+          const { selection } = yield* readSelection
+          const result = yield* repo.deleteMany(selection, { only: only(lock) })
+          const outcome = { done: result.done.length, missing: result.missing.length, restricted: result.restricted.length }
+          return bulkDone(Bulk.summary("deleted", outcome, messages.bulkDeleteRestricted), result.restricted)
+        }).pipe(
+          Effect.catchTags({ SignalsError: badSelection, SchemaError: unexpected, SqlError: unexpected })
+        )
+
+      /** Set one of the `bulk.set` fields on the selection, in one transaction. */
+      const bulkUpdateRows = (lock: Lock) =>
+        Effect.gen(function*() {
+          const repo = yield* RepoTag
+          const { selection, bulk } = yield* readBulkUpdate
+          const field = setFields.find((f) => f.key === bulk.field)
+          if (field === undefined) return toast(`${bulk.field} can't be set in bulk`, "error")
+          const raw = field.nullable && bulk.value === Query.NULL ? "" : field.kind === "boolean" ? bulk.value === "true" : bulk.value
+          const schema = Schema.Struct({ [field.key]: model.jsonUpdate.fields[field.key]! }) as unknown as
+            & Schema.Codec<Record<string, unknown>, unknown>
+            & { readonly fields: Schema.Struct.Fields }
+          const patch = yield* Form.decode(schema, { [field.key]: raw }).pipe(
+            Effect.mapError(() => new BulkValueError({ label: field.label }))
+          )
+          const result = yield* repo.updateMany(selection, patch as Partial<M["update"]["Type"]>, { only: only(lock) })
+          return bulkDone(Bulk.summary("updated", { done: result.done.length, missing: result.missing.length, restricted: 0 }, () => ""), [])
+        }).pipe(
+          Effect.catchTags({
+            SignalsError: badSelection,
+            BulkValueError: (e) => Effect.succeed(toast(`Invalid ${e.label.toLowerCase()}`, "error")),
+            SchemaError: unexpected,
+            SqlError: (e) => {
+              const match = e.reason._tag === "UniqueViolation"
+                ? pick(messages.unique, e)
+                : e.reason._tag === "ConstraintError"
+                ? pick(messages.invalidReference, e)
+                : undefined
+              return match ? Effect.succeed(toast(match[1], "error")) : unexpected(e)
+            }
+          })
+        )
+
       // --- views -------------------------------------------------------------
 
       const columnsFor = (lookups: Components.Lookups): ReadonlyArray<Components.Column<Row>> =>
@@ -644,9 +780,20 @@ export const define = <
         )
       }
 
+      const select: Components.Select<Row> = {
+        header: <Bulk.SelectAll paths={bulkPaths} />,
+        cell: (row) => <Bulk.SelectRow paths={bulkPaths} id={encodeId(row[idColumn])} label={label(row)} />
+      }
+
       /** A single row, as rendered in the table (same id), for row-level patches. */
       const RowView = (props: { readonly row: Row; readonly lookups: Components.Lookups; readonly lock: Lock }) => (
-        <Components.TableRow row={props.row} columns={columnsFor(props.lookups)} rowId={rowId} actions={actions(props.lock)} />
+        <Components.TableRow
+          row={props.row}
+          columns={columnsFor(props.lookups)}
+          rowId={rowId}
+          actions={actions(props.lock)}
+          select={select}
+        />
       )
 
       const TableView = (props: {
@@ -656,6 +803,22 @@ export const define = <
         readonly lock: Lock
       }) => (
         <Components.TablePanel id={`${ns}-table`}>
+          <Bulk.Bar
+            id={`${ns}-bulk`}
+            paths={bulkPaths}
+            plural={`${config.noun}s`}
+            setters={setFields.map((f) => ({
+              key: f.key,
+              label: f.label,
+              options: Components.fieldOptions(f, props.lookups[f.key]),
+              nullable: f.nullable
+            }))}
+            update={bulkUpdate.call(undefined, {
+              include: [path("selection"), path("bulk")],
+              search: search(props.lock)
+            })}
+            remove={bulkRemove.call(undefined, { include: [path("selection")], search: search(props.lock) })}
+          />
           <Components.Table
             id={`${ns}-rows`}
             columns={columnsFor(props.lookups)}
@@ -664,6 +827,7 @@ export const define = <
             query={path("query")}
             current={props.current}
             actions={actions(props.lock)}
+            select={select}
           />
           <Components.Pagination
             query={path("query")}
@@ -708,9 +872,19 @@ export const define = <
             id={`${ns}-section`}
             {...stylex.props(styles.section)}
             {...ds.merge(
-              signals.init({ [ns]: { query: props.query, draft: blankDraft, errors: noErrors, dialog: false } }),
-              options.syncUrl &&
-                ds.effect(`${$("_url")} && ${$("_url")} !== location.pathname + location.search && history.replaceState(null, '', ${$("_url")})`)
+              signals.init({
+                [ns]: {
+                  query: props.query,
+                  draft: blankDraft,
+                  errors: noErrors,
+                  dialog: false,
+                  selection: [],
+                  bulk: { field: "", value: "" },
+                  _page: props.initial ? pageIds(props.initial.page.rows) : [],
+                  ...(options.syncUrl ? UrlState.initial(urlFor(options.full(props.query, props.lock))) : {})
+                }
+              }),
+              options.syncUrl && UrlState.attrs(ns, restore.call(undefined, { include: [], searchExpr: "location.search" }))
             )}
           >
             <header {...stylex.props(styles.bar)}>
@@ -731,7 +905,12 @@ export const define = <
             <Components.FilterBar prefix={ns} filters={options.query.filters} query={path("query")} lookups={props.initial?.lookups} />
             <div
               id={`${ns}-live`}
-              {...ds.merge(ds.init(liveCall), ds.onSignalPatch(liveCall, { include: [path("query")], debounce: "200ms" }))}
+              {...ds.merge(
+                ds.init(liveCall),
+                ds.onSignalPatch(liveCall, { include: [path("query")], debounce: "200ms" }),
+                // Here, not on the section: an element has one `data-effect`, and the section's keeps the URL.
+                ds.effect(Bulk.prune(bulkPaths))
+              )}
             >
               {props.initial
                 ? <TableView page={props.initial.page} current={props.query} lookups={props.initial.lookups} lock={props.lock} />
@@ -772,7 +951,14 @@ export const define = <
           Effect.option
         )
 
-      const handlers: Table = { view: liveView, save, edit: openEdit, remove: removeRow }
+      const handlers: Table = {
+        view: liveView,
+        save,
+        edit: openEdit,
+        remove: removeRow,
+        bulkRemove: bulkRemoveRows,
+        bulkUpdate: bulkUpdateRows
+      }
       return { handlers, View, Editor, initial, fieldSelects }
     }
 
@@ -999,7 +1185,7 @@ export const define = <
         ...base,
         /** Error messages for database constraint violations, with the defaults for relations filled in. */
         messages,
-        endpoints: { view, create, update, edit, remove, record },
+        endpoints: { view, create, update, edit, remove, record, bulkRemove, bulkUpdate, restore },
         Page
       },
       section: (embed: AnyEmbed) => embedSections.get(embed.name)!,
@@ -1012,7 +1198,10 @@ export const define = <
           update.route,
           edit.route,
           remove.route,
-          record.route
+          record.route,
+          bulkRemove.route,
+          bulkUpdate.route,
+          restore.route
         ]) as Layer.Layer<never>
     }
   }

@@ -69,7 +69,7 @@ describe("row changes across processes", () => {
     expect(tablePatch(events)).toBeUndefined()
     const [row, ...others] = rowPatches(events)
     expect(others).toEqual([])
-    expect(row!.elements).toMatch(/^<tr id="users-87"[^>]*><td[^>]*>(<span[^>]*>|<a [^>]*>)?Renamed On A</)
+    expect(row!.elements).toMatch(/^<tr id="users-87"[^>]*>(<td[^>]*><input[^>]*\/?><\/td>)<td[^>]*>(<span[^>]*>|<a [^>]*>)?Renamed On A</)
     expect(counted).toEqual({ pages: 0, counts: 0, rows: 1 })
   })
 

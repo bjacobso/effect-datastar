@@ -75,7 +75,7 @@ describe("users live view, per change", () => {
     const [row, ...others] = rowPatches(events)
     expect(others).toEqual([])
     expect(patches(events)).toHaveLength(1)
-    expect(row!.elements).toMatch(/^<tr id="users-87"[^>]*><td[^>]*>(<span[^>]*>|<a [^>]*>)?Renamed Live</)
+    expect(row!.elements).toMatch(/^<tr id="users-87"[^>]*>(<td[^>]*><input[^>]*\/?><\/td>)<td[^>]*>(<span[^>]*>|<a [^>]*>)?Renamed Live</)
     // Patched by its id (default `outer` mode, no selector).
     expect(row!.selector).toBeUndefined()
     expect(row!.mode).toBeUndefined()

@@ -21,6 +21,15 @@
  * them, so a change made by another server process (through
  * `DistributedReactivity`) is handled exactly like a local one. No payload, or
  * one that doesn't decode, means "unknown change": a full re-query.
+ *
+ * Bulk changes (`updateMany`, `deleteMany`) run in one transaction and, once it
+ * has committed, invalidate once: every row's record key in one invalidation
+ * (`{ users: [3, 7, 9] }`), with every row's `Change` in one payload
+ * (`{ table, changes: [...] }`). Each stream is woken once and plans the whole
+ * batch, so a bulk edit of columns a view doesn't sort or filter on is still one
+ * re-fetch of the visible rows, and anything else one re-query. (This is why
+ * bulk changes don't use `Reactivity.withBatch`: a batched handler runs after
+ * the payload is gone; see "changes" below.)
  */
 import { type Cause, Effect, Option, Queue, Schema, Stream } from "effect"
 import type * as Arr from "effect/Array"
@@ -43,6 +52,21 @@ export type Change<Id> =
   | { readonly _tag: "Insert"; readonly id: Id }
   | { readonly _tag: "Update"; readonly id: Id; readonly columns: ReadonlyArray<string> }
   | { readonly _tag: "Delete"; readonly id: Id }
+
+/** What a bulk mutation did, per requested id. */
+export interface BulkResult<Id> {
+  /** Updated or deleted. */
+  readonly done: ReadonlyArray<Id>
+  /** Not found, or excluded by `only`: the caller should treat them as gone. */
+  readonly missing: ReadonlyArray<Id>
+  /** Deletes the database rejected because other rows still reference them (foreign keys). */
+  readonly restricted: ReadonlyArray<Id>
+}
+
+export interface BulkOptions<Row> {
+  /** Rows to leave alone, as if they didn't exist (e.g. outside an embed's lock). Checked inside the transaction. */
+  readonly only?: ((row: Row) => boolean) | undefined
+}
 
 /** Why a live stream was woken up. */
 export type Signal<Id> =
@@ -106,6 +130,24 @@ export interface Repo<S extends Model.Any, Id extends keyof S["fields"], Sortabl
   readonly insert: (value: S["insert"]["Type"]) => Effect.Effect<S["Type"], Schema.SchemaError | SqlError.SqlError>
   readonly update: (value: S["update"]["Type"]) => Effect.Effect<S["Type"], Schema.SchemaError | SqlError.SqlError>
   readonly delete: (id: S["fields"][Id]["Type"]) => Effect.Effect<void, Schema.SchemaError | SqlError.SqlError>
+  /**
+   * Set the same values on many rows, in one transaction, with one invalidation
+   * once it has committed. `patch` holds `update`-variant values for some fields.
+   */
+  readonly updateMany: (
+    ids: ReadonlyArray<S["fields"][Id]["Type"]>,
+    patch: Partial<S["update"]["Type"]>,
+    options?: BulkOptions<S["Type"]>
+  ) => Effect.Effect<BulkResult<S["fields"][Id]["Type"]>, Schema.SchemaError | SqlError.SqlError>
+  /**
+   * Delete many rows in one transaction, with one invalidation once it has
+   * committed. Each delete runs in a savepoint: one the database restricts (a
+   * foreign key) is reported in `restricted` and the others still go through.
+   */
+  readonly deleteMany: (
+    ids: ReadonlyArray<S["fields"][Id]["Type"]>,
+    options?: BulkOptions<S["Type"]>
+  ) => Effect.Effect<BulkResult<S["fields"][Id]["Type"]>, Schema.SchemaError | SqlError.SqlError>
 }
 
 const sameValue = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b)
@@ -171,14 +213,16 @@ export const make = <
       () => Payload.local(reactivity)
     )
     const IdJson = Schema.toCodecJson(model.fields[options.idColumn] as Schema.Codec<RowId, unknown>)
-    const ChangeJson = Schema.Struct({
-      table: Schema.Literal(options.table),
-      change: Schema.Union([
-        Schema.TaggedStruct("Insert", { id: IdJson }),
-        Schema.TaggedStruct("Update", { id: IdJson, columns: Schema.Array(Schema.String) }),
-        Schema.TaggedStruct("Delete", { id: IdJson })
-      ])
-    })
+    const ChangeSchema = Schema.Union([
+      Schema.TaggedStruct("Insert", { id: IdJson }),
+      Schema.TaggedStruct("Update", { id: IdJson, columns: Schema.Array(Schema.String) }),
+      Schema.TaggedStruct("Delete", { id: IdJson })
+    ])
+    // One change (single-row mutations, and what older senders send), or several (bulk).
+    const ChangeJson = Schema.Union([
+      Schema.Struct({ table: Schema.Literal(options.table), change: ChangeSchema }),
+      Schema.Struct({ table: Schema.Literal(options.table), changes: Schema.Array(ChangeSchema) })
+    ])
     const encodeChange = Schema.encodeSync(ChangeJson)
     const decodeChange = Schema.decodeUnknownOption(ChangeJson)
 
@@ -188,11 +232,23 @@ export const make = <
         payloads.invalidateUnsafe({ [options.table]: [change.id] }, payload)
       })
 
+    /** One invalidation for many changed rows (nothing if there are none). */
+    const announceAll = (changes: ReadonlyArray<Change<RowId>>) =>
+      Effect.sync(() => {
+        if (changes.length === 0) return
+        const payload: Schema.Json = encodeChange({ table: options.table, changes })
+        payloads.invalidateUnsafe({ [options.table]: changes.map((c) => c.id) }, payload)
+      })
+
     /** Why this table's key was invalidated, from the current payload (local or remote). */
-    const tableSignal = (): Signal<RowId> => {
+    const tableSignals = (): ReadonlyArray<Signal<RowId>> => {
       const payload = payloads.current()
       const decoded = payload === undefined ? Option.none() : decodeChange(payload)
-      return Option.isSome(decoded) ? { _tag: "Change", change: decoded.value.change } : { _tag: "Table" }
+      if (Option.isNone(decoded)) return [{ _tag: "Table" }]
+      const value = decoded.value
+      return "change" in value
+        ? [{ _tag: "Change", change: value.change }]
+        : value.changes.map((change): Signal<RowId> => ({ _tag: "Change", change }))
     }
 
     /** Columns whose stored (encoded) value differs between two versions of a row (all, if unknown). */
@@ -232,21 +288,89 @@ export const make = <
 
     const remove = (id: RowId) => Effect.tap(base.delete(id), () => announce({ _tag: "Delete", id }))
 
+    // --- bulk ------------------------------------------------------------------
+
+    const updateFields = (model.update as unknown as { readonly fields: Schema.Struct.Fields }).fields
+
+    /** The requested rows that exist and pass `only`, read inside the transaction. */
+    const inScope = (ids: ReadonlyArray<RowId>, bulk?: BulkOptions<Row>) =>
+      Effect.map(ids.length === 0 ? Effect.succeed([]) : findByIds(ids), (rows) => {
+        const found = rows.filter((row) => bulk?.only === undefined || bulk.only(row))
+        const ok = new Set(found.map(idOf))
+        return { found, missing: ids.filter((id) => !ok.has(id)) }
+      })
+
+    const unique = (ids: ReadonlyArray<RowId>) => [...new Set(ids)]
+
+    const updateMany = (ids: ReadonlyArray<RowId>, patch: Partial<S["update"]["Type"]>, bulk?: BulkOptions<Row>) =>
+      Effect.gen(function*() {
+        const keys = Object.keys(patch).filter((k) => k !== options.idColumn && k in updateFields)
+        const encoded = (yield* Schema.encodeUnknownEffect(
+          Schema.Struct(Object.fromEntries(keys.map((k) => [k, updateFields[k]!])))
+        )(patch)) as Record<string, unknown>
+        const { changes, result } = yield* sql.withTransaction(Effect.gen(function*() {
+          const { found, missing } = yield* inScope(unique(ids), bulk)
+          const done = found.map(idOf)
+          if (done.length > 0 && keys.length > 0) {
+            yield* sql`UPDATE ${table} SET ${sql.update(encoded)} WHERE ${sql.in(options.idColumn, done)}`
+          }
+          const changes = yield* Effect.forEach(found, (row) =>
+            Effect.map(encodeRow(row), (before): Change<RowId> => ({
+              _tag: "Update",
+              id: idOf(row),
+              columns: keys.filter((k) => !sameValue((before as Record<string, unknown>)[k], encoded[k]))
+            })))
+          const result: BulkResult<RowId> = { done, missing, restricted: [] }
+          return { changes, result }
+        }))
+        // Committed: one invalidation for all of them (a row whose values didn't change goes
+        // along with no columns, which streams skip).
+        yield* announceAll(changes)
+        return result
+      }).pipe(Effect.withSpan(`${options.table}.updateMany`))
+
+    const deleteMany = (ids: ReadonlyArray<RowId>, bulk?: BulkOptions<Row>) =>
+      Effect.gen(function*() {
+        const result = yield* sql.withTransaction(Effect.gen(function*() {
+          const { found, missing } = yield* inScope(unique(ids), bulk)
+          const done: Array<RowId> = []
+          const restricted: Array<RowId> = []
+          for (const row of found) {
+            const id = idOf(row)
+            // A savepoint each: a restricted delete rolls back alone.
+            const outcome = yield* sql.withTransaction(base.delete(id)).pipe(
+              Effect.as("done" as const),
+              Effect.catchTag("SqlError", (e) =>
+                e.reason._tag === "ConstraintError" ? Effect.succeed("restricted" as const) : Effect.fail(e))
+            )
+            ;(outcome === "done" ? done : restricted).push(id)
+          }
+          const result: BulkResult<RowId> = { done, missing, restricted }
+          return result
+        }))
+        yield* announceAll(result.done.map((id): Change<RowId> => ({ _tag: "Delete", id })))
+        return result
+      }).pipe(Effect.withSpan(`${options.table}.deleteMany`))
+
     // --- live ----------------------------------------------------------------
 
     const live = (q: ListQuery<Sortable, FK>, liveOptions?: { readonly dependsOn?: ReadonlyArray<string> | undefined }) =>
       Stream.unwrap(Effect.gen(function*() {
         const signals = yield* Queue.unbounded<Signal<RowId>>()
         yield* Effect.acquireRelease(Effect.sync(() => watchers++), () => Effect.sync(() => watchers--))
-        const register = (keys: ReadonlyArray<string>, signal: () => Signal<RowId>) =>
+        const register = (keys: ReadonlyArray<string>, signal: () => ReadonlyArray<Signal<RowId>>) =>
           Effect.acquireRelease(
-            Effect.sync(() => reactivity.registerUnsafe(keys, () => Queue.offerUnsafe(signals, signal()))),
+            Effect.sync(() =>
+              reactivity.registerUnsafe(keys, () => {
+                for (const s of signal()) Queue.offerUnsafe(signals, s)
+              })
+            ),
             (cancel) => Effect.sync(cancel)
           )
         // Registered before the first query, so no change can slip in between.
-        yield* register([options.table], tableSignal)
+        yield* register([options.table], tableSignals)
         const dependsOn = liveOptions?.dependsOn ?? []
-        if (dependsOn.length > 0) yield* register(dependsOn, () => ({ _tag: "Dependency" }))
+        if (dependsOn.length > 0) yield* register(dependsOn, () => [{ _tag: "Dependency" }])
 
         const queryColumns = new Set(options.query.columns(q))
         let current: Page<Row> | undefined
@@ -286,6 +410,6 @@ export const make = <
       }))
 
     // The model is constrained to need no services, which TS cannot see through the generic.
-    const repo = { findById: base.findById, list, live, insert, update, delete: remove }
+    const repo = { findById: base.findById, list, live, insert, update, delete: remove, updateMany, deleteMany }
     return repo as unknown as Repo<S, Id, Sortable, FK>
   })

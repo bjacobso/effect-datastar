@@ -36,6 +36,7 @@ export const Users = Resource.define({
     unique: { email: "Email is already taken" },
     invalidReference: { teamId: "That team no longer exists" }
   },
+  bulk: { set: ["role", "teamId"] },  // bulk actions: Delete, "Set role…", "Set team…"
   layout: Layout
 })
 ```
@@ -56,8 +57,8 @@ export const Resources = Resource.app(
 
 That gives each resource a list page (server-rendered for the query in the
 URL), a live table, filters, sorting, paging, a create/edit dialog with
-per-field validation errors, delete, a detail page, and the `Repo` / `Lookup`
-services. A definition with nothing to attach can be passed to `app` as is.
+per-field validation errors, delete, bulk actions on selected rows, a detail
+page, and the `Repo` / `Lookup` services. A definition with nothing to attach can be passed to `app` as is.
 
 | Route                    |                                             |
 | ------------------------ | ------------------------------------------- |
@@ -69,6 +70,9 @@ services. A definition with nothing to attach can be passed to `app` as is.
 | `DELETE /users/:id`      | delete                                      |
 | `GET    /users/:id`      | detail page: fields, Edit, Delete, sections |
 | `GET    /users/:id/view` | live record (SSE)                           |
+| `POST   /users/bulk/delete` | delete the selected rows                 |
+| `POST   /users/bulk/update` | set one field on the selected rows       |
+| `GET    /users/query`    | the query signals for a URL (Back/Forward)  |
 
 Each route is registered once; embeds reuse them (below). Endpoint paths are
 typed as registered (`Resources.resources.users.endpoints.update.path` is
@@ -139,10 +143,12 @@ the query string. Its query lives in its signals and resets on reload.
 - `src/crud/`: building blocks derived from a schema
   - `Resource.tsx`: composes everything below into resources (`define`, then `app`)
   - `Query.ts`: query signals schema, SQL `WHERE` / `ORDER BY`, URL params
-  - `Repo.ts`: `SqlModel.makeRepository` plus paginated `list` and a `live` stream with row-level updates
+  - `Repo.ts`: `SqlModel.makeRepository` plus paginated `list`, a `live` stream with row-level updates, and transactional `updateMany` / `deleteMany`
   - `Lookup.ts`: options from another table, for foreign-key selects, filters and labels
   - `Field.ts`, `Form.ts`: field metadata, form drafts (with input coercion) and per-field errors
   - `components.tsx`: generic filter bar, sortable table, pagination, form fields and dialog (React + StyleX)
+  - `Bulk.tsx`: selection checkboxes, the bulk bar and its toasts
+  - `UrlState.ts`: the query in the address bar, with history (push, typing, popstate)
   - `Feedback.tsx`: toast and unexpected-error patches
   - `Api.ts`: a JSON `HttpApiGroup` (list, get, create, update, delete) from a resource
 - `src/ui/`: the design system, copied from `@dw/ui` (document-workflow-service `packages/ui`): StyleX tokens and themes (`theme/`), global CSS and fonts, Button, form styles and the ui-sdk Select, Dialog (`overlay.tsx`), Menu, display pieces and icons
@@ -245,6 +251,66 @@ most of ui-sdk, so the total shrinks only by the islands a page lacks. The gain 
 of it blocks Datastar any more: React and the islands download in parallel while the
 server-rendered page is already live. A new island that only some pages use costs nothing
 elsewhere.
+
+## Bulk actions
+
+Every table (the list page's and embeds) has a checkbox per row and a "select
+all on this page" checkbox in the header. While anything is selected, a bar
+above the rows shows "N selected", **Delete**, **Clear**, and a "Set <field>…"
+select per field in the resource's `bulk.set` (for users: role and team; the
+team options stay live like the form's). `src/crud/Bulk.tsx` has the UI and the
+toasts; `Resource` wires the endpoints.
+
+**The selection is a plain signal**, `users.selection` (the ids, in the id
+field's JSON form), not a `_`-prefixed local one. Datastar never sends a local
+signal, so the bulk action would have to carry the ids itself (`@post('/users/bulk/delete?ids=' +
+$users._selection.join(','))`): hand-built URL encoding, a length limit, and a
+second way for input to reach the server. As a normal signal it is sent only
+where asked for, `include: [users.selection]` on the two bulk actions (the live
+view sends just `users.query`, the dialog just `users.draft`), the server
+decodes it with a schema (`Array(UserId)`, 1 to 500 ids) like every other
+signal, and it can patch it: `selection: []` after a successful action. The
+page's ids live in a local signal, `users._page`, which the live view patches
+with every page it renders; "select all" copies it, and an effect drops
+selected ids that are no longer on the page after a re-render (deleted
+elsewhere, filtered out, paged away). Checkboxes aren't `data-bind`ed (Datastar
+binds checkboxes to arrays by position, not by value): each row's has an
+effect `el.checked = $users.selection.includes(87)` and a change handler.
+
+**On the server** (`POST /users/bulk/delete`, `POST /users/bulk/update`):
+
+- The ids are decoded with the id field's schema; an empty, malformed or
+  oversized selection is a toast. The update's field must be in `bulk.set` and
+  its value is decoded with the field's `jsonUpdate` schema (`"null"` is "No
+  team"), so it is validated exactly as the edit form would.
+- `Repo.updateMany` / `Repo.deleteMany` run in **one transaction**: read the
+  rows, apply the change (one `UPDATE … WHERE id IN (…)`, or one `DELETE` per
+  row in its own savepoint, so a row the database restricts rolls back alone).
+  A value the database rejects (a team deleted meanwhile) rolls back the whole
+  update.
+- **The embed lock holds**: with `?embed=members&scope=2`, rows outside team 2
+  are filtered out inside the transaction and count as "no longer exists", and
+  the locked field can't be set in bulk.
+- **Partial failures are reported**: "2 deleted, 1 has members" (the team
+  resource's `messages.bulkDeleteRestricted`), "1 updated, 1 no longer exists".
+  Rows the database kept stay selected; otherwise the selection is cleared.
+
+**Live updates: one invalidation per bulk change.** `Reactivity.withBatch` is
+no help here: `Repo` invalidates synchronously so handlers can read the
+change's payload, and a batched handler would run after the payload is gone
+(see the comments in `Repo.ts`). Instead the bulk methods invalidate once,
+after the commit, with every row's record key (`{ users: [84, 83, 82] }`) and
+one payload carrying every row's `Change` (`{ table, changes: [...] }`; single
+changes keep `{ table, change }`, so older processes still decode). Each stream
+is woken once and plans the whole batch, so row-level tracking still applies:
+setting the team of three visible rows is one re-fetch of those rows in a view
+that doesn't filter on team, and one re-query in a view that does.
+`test/queries.test.ts`, six open views:
+
+| Mutation                    | Statements | Three single mutations |
+| --------------------------- | ---------- | ---------------------- |
+| bulk set team, 3 users      | 7          | 15                     |
+| bulk delete, 3 users        | 24         | 39                     |
 
 ## How live updates work
 
@@ -394,8 +460,25 @@ curl -X POST localhost:3000/api/users -H 'content-type: application/json' \
 
 `GET /users?teamId=3&sort=name&dir=asc` renders that query on the server, so the
 first paint has the table. Each new live stream patches a local signal
-(`users._url`) with the canonical URL, which the page mirrors into the address
-bar with `history.replaceState`. Both directions use the same `Query` config:
+(`users._url`) with the canonical URL, which the page writes to the address
+bar (`src/crud/UrlState.ts`):
+
+- **Filters, sort and page push history entries**, so Back and Forward step
+  through list states.
+- **Typing in a text filter is one entry**: its first change pushes, the rest
+  replace that entry until the field loses focus (`_typing` / `_pushed` local
+  signals), so a search isn't an entry per keystroke.
+- **Opening a non-canonical URL replaces it** (`?page=99&role=root` becomes
+  `?page=9` without an extra entry).
+- **Back/Forward restore the query**: on `popstate` the page calls
+  `GET /users/query?<the URL's params>`, which answers with a `patchSignals` of
+  `users.query`; the live view re-queries as for any query change, and its
+  stream's `_url` already matches the address, so nothing is pushed. A server
+  round-trip rather than parsing in the browser: `Query.fromSearchParams` stays
+  the only parser (defaults, per-field schemas, page sizes, invalid params), so
+  Back shows exactly what a reload of that URL would.
+
+Only the list page's table owns the URL; embeds don't. Both directions use the same `Query` config:
 defaults are left out of the URL, and invalid params fall back to defaults.
 Filter values are checked against the field's own schema, so `?teamId=1.5`
 (`TeamId` is an integer) is dropped like `?role=root`, and the same value in

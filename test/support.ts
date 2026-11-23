@@ -171,9 +171,16 @@ export const userDraft = (draft: Record<string, unknown>) => ({
   users: { draft: { id: "", name: "", email: "", role: "member", teamId: "", active: true, ...draft } }
 })
 
-/** Text of the first cell of each row in a rendered table (rows and cells carry StyleX classes). */
+/**
+ * Text of the first data cell of each row in a rendered table (after the selection
+ * checkbox; rows and cells carry StyleX classes).
+ */
 export const rowNames = (html: string) =>
-  [...html.matchAll(/<tr id="(?:users|teams|members)-\d+"[^>]*><td[^>]*>(?:<span[^>]*>|<a [^>]*>)?([^<]*)/g)].map((m) => m[1])
+  [
+    ...html.matchAll(
+      /<tr id="(?:users|teams|members)-\d+"[^>]*>(?:<td[^>]*><input[^>]*\/?><\/td>)?<td[^>]*>(?:<span[^>]*>|<a [^>]*>)?([^<]*)/g
+    )
+  ].map((m) => m[1])
 
 /** Decodes the entities React's server renderer writes in text and attribute values. */
 export const decode = (html: string) =>
