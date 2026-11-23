@@ -81,7 +81,7 @@ describe("server-rendered pages", () => {
     expect(props.options).toContainEqual({ value: "2", label: "Growth" })
   })
 
-  it("render the dialog as an island driven by the dialog signal, with the form in its template", async () => {
+  it("render the dialog as an island driven by the dialog signal, with the form in its content holder", async () => {
     const html = await app.page("/users")
     const host = /<ds-island[^>]*id="users-dialog"[^>]*>/.exec(html)![0]
     expect(attributes(host)).toMatchObject({
@@ -89,8 +89,19 @@ describe("server-rendered pages", () => {
       "data-attr:open": "$users.dialog",
       "data-on:close": "$users.dialog = false"
     })
-    const template = /<ds-island[^>]*id="users-dialog"[\s\S]*?<template>([\s\S]*?)<\/template>/.exec(html)![1]!
-    expect(template).toMatch(/^<form /)
-    expect(template).toContain(`id="users-field-teamId"`)
+    // Live (hidden) markup, not a <template>: patches can reach the form before the island loads.
+    const content = /<ds-island[^>]*id="users-dialog"[\s\S]*?<div data-island-content="" data-ignore-morph="" hidden="">([\s\S]*?)<\/form>/
+      .exec(html)![1]!
+    expect(content).toMatch(/^<form /)
+    expect(content).toContain(`id="users-field-teamId"`)
+  })
+})
+
+describe("island loaders", () => {
+  it("has a browser loader for every island, loading that island", async () => {
+    const { all } = await import("../src/islands/islands.tsx")
+    const { loaders } = await import("../src/islands/loaders.ts")
+    expect(Object.keys(loaders).sort()).toEqual(all.map((i) => i.name).sort())
+    for (const island of all) expect(await loaders[island.name]!()).toBe(island)
   })
 })

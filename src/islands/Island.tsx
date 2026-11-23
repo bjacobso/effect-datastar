@@ -6,12 +6,14 @@
  *
  *   <ds-island name="select" props='{"options":[...]}' data-bind="users.draft.teamId">
  *     <div data-island-root data-ignore-morph>…the component, rendered once on the server…</div>
- *     <template>…optional server-rendered content the island places (the dialog's form)…</template>
+ *     <div data-island-content data-ignore-morph hidden>…optional server-rendered content the
+ *       island places itself (the dialog's form)…</div>
  *   </ds-island>
  *
- * and `client.tsx` (the only browser bundle) defines `<ds-island>`, which mounts the
- * component into `[data-island-root]` with `createRoot` (no hydration: the server markup
- * is a placeholder, so the two never have to match).
+ * and `client.tsx` (the browser entry) defines `<ds-island>`, which loads the island's
+ * code on demand (`loaders.ts`) and mounts the component into `[data-island-root]` with
+ * `createRoot` (no hydration: the server markup is a placeholder, so the two never have
+ * to match).
  *
  * Datastar stays in charge of state. The host is the boundary:
  *
@@ -25,26 +27,17 @@
  * Morphs: `[data-island-root]` has `data-ignore-morph`, so morphing an ancestor leaves the
  * React DOM alone while the host's own attributes (`props`) still update. Replacing the
  * host (a `replace` patch) unmounts the old island and mounts a new one.
+ *
+ * Content: it is live (hidden) markup from the start, not a `<template>`, so Datastar binds
+ * it and patches can target what is inside before the island's code has loaded (islands
+ * load on demand). The island moves the nodes where it wants them when it mounts.
  */
 import * as stylex from "@stylexjs/stylex"
 import type { DetailedHTMLProps, HTMLAttributes, ReactNode } from "react"
 import type { Attrs } from "../datastar/Attrs.ts"
+import { type Host, TAG } from "./host.ts"
 
-export const TAG = "ds-island"
-
-/** What an island component sees of its host element. */
-export interface Host {
-  /** The value Datastar binds with `data-bind` on the host. */
-  readonly value: unknown
-  /** Sets the value and tells Datastar (a `change` event on the host). */
-  readonly setValue: (value: unknown) => void
-  /** An attribute of the host, e.g. one Datastar sets with `data-attr:*`. */
-  readonly attr: (name: string) => string | null
-  /** Dispatches an event on the host, for `data-on:*`. */
-  readonly emit: (type: string) => void
-  /** The host's server-rendered `<template>` content, cloned once per mount. */
-  readonly content: DocumentFragment | null
-}
+export { type Host, TAG }
 
 export interface Island<P> {
   readonly name: string
@@ -103,7 +96,7 @@ export function Mount<P>(props: {
       <div data-island-root="" data-ignore-morph="">
         <island.Component props={props.props} host={staticHost(props.value ?? "", attrs)} />
       </div>
-      {props.content !== undefined && <template>{props.content}</template>}
+      {props.content !== undefined && <div data-island-content="" data-ignore-morph="" hidden>{props.content}</div>}
     </ds-island>
   )
 }

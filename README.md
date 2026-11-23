@@ -139,7 +139,7 @@ the query string. Its query lives in its signals and resets on reload.
   - `Feedback.tsx`: toast and unexpected-error patches
   - `Api.ts`: a JSON `HttpApiGroup` (list, get, create, update, delete) from a resource
 - `src/ui/`: the design system, copied from `@dw/ui` (document-workflow-service `packages/ui`): StyleX tokens and themes (`theme/`), global CSS and fonts, Button, form styles and the ui-sdk Select, Dialog (`overlay.tsx`), Menu, display pieces and icons
-- `src/islands/`: React islands inside Datastar pages (`Island.tsx`: the `<ds-island>` host; `islands.tsx`: Select, Dialog, Theme; `client.tsx`: the browser bundle)
+- `src/islands/`: React islands inside Datastar pages (`Island.tsx`: the `<ds-island>` host; `select.tsx`, `dialog.tsx`, `theme.tsx`: the islands, gathered in `islands.tsx`; `client.tsx`: the browser entry; `loaders.ts`, `mount.tsx`: the code it loads on demand)
 - `src/reactivity/`: `Reactivity` across processes (`Broadcast`, `DistributedReactivity`, `SqliteBroadcast`), and `Payload.ts` for invalidations that say what changed
 - `src/app/`: the `users` and `teams` definitions, their assembly with the relation and the team page's members (`Resources.ts`), the JSON API (`Api.ts`), migrations (`Db.ts`) and app composition (`App.tsx`)
 - `scripts/build.ts`: the esbuild + StyleX build (`npm run build`, `npm run dev`)
@@ -161,7 +161,9 @@ the query string. Its query lives in its signals and resets on reload.
   server is bundled too. `scripts/build.ts` runs esbuild with `@stylexjs/unplugin` twice in
   one process, server then browser, and writes:
   - `dist/server.js`, the server, with dependencies left external.
-  - `public/build/islands.js`, React and the islands.
+  - `public/build/islands.js`, the browser entry: a small loader that defines `<ds-island>`,
+    and `public/build/chunks/`, React and each island, split out (esbuild `splitting`, ESM)
+    and loaded on demand. See [Islands](#islands).
   - `public/build/app.css`, the global CSS and fonts plus every StyleX rule from both builds.
     It is served as a static file.
 
@@ -185,9 +187,10 @@ with the component rendered once as a placeholder:
 // </ds-island>
 ```
 
-`islands.js` defines `<ds-island>`, which mounts the component with `createRoot` (it doesn't
-hydrate, so server and client markup never have to match). The host element is where Datastar
-and React meet:
+`islands.js` defines `<ds-island>`. A host, once connected, loads React and its island's
+code (`src/islands/loaders.ts`: one dynamic import per island) and mounts the component with
+`createRoot` (it doesn't hydrate, so server and client markup never have to match). The host
+element is where Datastar and React meet:
 
 - **Value:** Datastar v1 binds `data-bind` to the `value` property of any custom element that
   has one, and listens for `change`. The island reads `host.value`; `host.setValue(v)` sets it
@@ -211,9 +214,30 @@ Islands in this app:
   `<select>`s.
 - `Dialog`: the create/edit dialog, a ui-sdk Dialog that is open while `$ns.dialog` is true.
   Escape, the backdrop and the close button emit `close`. Its content is the server-rendered
-  form, sent in a `<template>` and placed once with `keepMounted`. Datastar binds that form like
-  any other markup, and the select inside it always exists as a patch target.
+  form, sent as hidden live markup (`data-island-content`) and moved into the dialog once
+  (`keepMounted`). Datastar binds that form like any other markup from the start, and the
+  select inside it always exists as a patch target, even before the island's code has loaded.
+  The dialog is modal only while open: ui-sdk would otherwise swallow clicks on the page
+  during its exit transition (see `src/ui/overlay.tsx`).
 - `Theme`: the Light/Dark/System menu (ui-sdk Menu).
+
+**Code splitting.** `islands.js` is only the custom element: no React. Each island is a
+chunk, and React plus the ui-sdk code they share are common chunks, fetched when the first
+host on the page connects. `islands.js` still loads before `datastar.js`, so every host is
+upgraded (and has its `value` property) before Datastar binds it; the `value` is kept until
+the island renders it. Sizes (minified, from `npm run build`):
+
+| JavaScript                                   | Before (one bundle) | After                           |
+| -------------------------------------------- | ------------------- | ------------------------------- |
+| loaded before `datastar.js` runs             | 470 KB (157 KB gz)  | 2.2 KB                          |
+| total, `/users` (Theme, Dialog, Select)      | 470 KB              | 437 KB (154 KB gz), 19 files    |
+| total, `/teams`, `/teams/:id` (no Select)    | 470 KB              | 428 KB (151 KB gz), 18 files    |
+
+Every page has the theme menu and a dialog, which between them need React (≈210 KB) and
+most of ui-sdk, so the total shrinks only by the islands a page lacks. The gain is that none
+of it blocks Datastar any more: React and the islands download in parallel while the
+server-rendered page is already live. A new island that only some pages use costs nothing
+elsewhere.
 
 ## How live updates work
 

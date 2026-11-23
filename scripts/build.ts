@@ -2,7 +2,8 @@
  * Builds the app with esbuild and the StyleX unplugin:
  *
  * - `dist/server.js`: the server, bundled (dependencies stay external).
- * - `public/build/islands.js`: the browser bundle, React islands only.
+ * - `public/build/islands.js`: the browser entry, a small loader for `<ds-island>`, plus
+ *   `public/build/chunks/`: React and each island, split out and loaded on demand.
  * - `public/build/app.css`: the global stylesheet and fonts (`src/ui/theme/global.css`),
  *   then every StyleX rule from both bundles.
  *
@@ -51,6 +52,10 @@ const options = (dev: boolean) => {
     outdir: "public/build",
     platform: "browser",
     format: "esm",
+    // `islands.js` is a small loader; each island (and React, shared) is a chunk it
+    // imports on demand (`src/islands/loaders.ts`).
+    splitting: true,
+    chunkNames: "chunks/[name]-[hash]",
     target: "es2023",
     minify: !dev,
     define: { "process.env.NODE_ENV": JSON.stringify(dev ? "development" : "production") },
