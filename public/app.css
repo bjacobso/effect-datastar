@@ -35,3 +35,10 @@ dialog footer { display:flex; justify-content:flex-end; gap:8px; }
 nav.top { max-width:1100px; margin:0 auto; padding:16px 16px 0; display:flex; gap:16px; }
 nav.top a { color:var(--muted); text-decoration:none; font-weight:600; padding-bottom:4px; border-bottom:2px solid transparent; }
 nav.top a.active { color:var(--fg); border-color:var(--accent); }
+a { color: var(--accent); }
+td a { text-decoration: none; } td a:hover { text-decoration: underline; }
+.crumbs { margin: 0 0 12px; } .crumbs a { color: var(--muted); text-decoration: none; }
+dl.record { display:grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 16px 0 32px; }
+dl.record dt { color: var(--muted); } dl.record dd { margin: 0; }
+section.resource + section.resource, #teams-record-live + section.resource { margin-top: 24px; }
+h2 { font-size: 18px; margin: 0; }

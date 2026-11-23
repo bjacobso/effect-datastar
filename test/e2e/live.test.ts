@@ -178,3 +178,56 @@ describe("live updates across tabs", () => {
     await teams.close()
   })
 })
+
+describe("team detail page", () => {
+  it("links from the teams table, shows live members, creates into the team and follows a rename", async () => {
+    const detail = await open("/teams")
+    await detail.locator("tbody a", { hasText: "Support" }).click()
+    await detail.waitForURL(/\/teams\/5$/)
+    await expect.poll(() => detail.locator("#teams-record h1").innerText()).toBe("Support")
+    await expect.poll(() => total(detail).innerText()).toBe("14 total")
+    // The locked column and filter are hidden.
+    expect(await detail.locator("#members-filter-teamId").count()).toBe(0)
+    expect(await detail.locator("thead").innerText()).not.toContain("Team")
+
+    // Sorting and filtering inside the embed leave the page URL alone.
+    await detail.locator("button.sort", { hasText: "Name" }).click()
+    await detail.fill(`input[placeholder^="Search name"]`, "ada")
+    await expect.poll(async () => Number((await total(detail).innerText()).split(" ")[0])).toBeLessThan(14)
+    expect(new URL(detail.url()).pathname + new URL(detail.url()).search).toBe("/teams/5")
+    await detail.fill(`input[placeholder^="Search name"]`, "")
+    await expect.poll(() => total(detail).innerText()).toBe("14 total")
+
+    // Create from the embedded table: the new member lands in this team.
+    await detail.locator("#members-section header button", { hasText: "New user" }).click()
+    expect(await detail.locator("#members-dialog select").count()).toBe(1) // role only, no team
+    await detail.fill("#members-dialog input[type=text]", "Embedded Person")
+    await detail.fill("#members-dialog input[type=email]", "embedded@example.com")
+    await detail.locator("#members-dialog button[type=submit]").click()
+    await expect.poll(() => detail.locator("#toast").innerText()).toBe("Created Embedded Person")
+    await expect.poll(() => total(detail).innerText()).toBe("15 total")
+
+    // A users tab sees the new member in Support, and its team cell links back.
+    const users = await open("/users?name=Embedded")
+    await expect.poll(() => users.locator("tbody tr td:nth-child(4)").first().innerText()).toBe("Support")
+    expect(await users.locator("tbody tr td:nth-child(4) a").getAttribute("href")).toBe("/teams/5")
+
+    // Rename the team from the teams page: the detail page and the users tab follow.
+    const teams = await open("/teams")
+    await teams.locator("tbody tr", { hasText: "Support" }).locator("button", { hasText: "Edit" }).click()
+    await teams.fill("dialog input[type=text]", "Support Ops")
+    await teams.locator("dialog button[type=submit]").click()
+    await expect.poll(() => detail.locator("#teams-record h1").innerText()).toBe("Support Ops")
+    await expect.poll(() => users.locator("tbody tr td:nth-child(4)").first().innerText()).toBe("Support Ops")
+
+    expect([...detail.errors, ...users.errors, ...teams.errors]).toEqual([])
+    await Promise.all([detail.close(), users.close(), teams.close()])
+  })
+
+  it("404s for unknown and malformed ids", async () => {
+    const page = await browser.newPage()
+    expect((await page.goto(base + "/teams/999"))!.status()).toBe(404)
+    expect((await page.goto(base + "/teams/abc"))!.status()).toBe(404)
+    await page.close()
+  })
+})

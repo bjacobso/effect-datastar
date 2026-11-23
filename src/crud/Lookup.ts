@@ -13,6 +13,8 @@ import { SqlClient } from "effect/sql"
 export interface Option {
   readonly value: string
   readonly label: string
+  /** Link to the referenced row's page, when it has one. */
+  readonly href?: string | undefined
 }
 
 export interface Lookup {
@@ -20,13 +22,21 @@ export interface Lookup {
   readonly options: Effect.Effect<ReadonlyArray<Option>, import("effect/sql").SqlError.SqlError>
 }
 
-export const make = (config: { readonly table: string; readonly value: string; readonly label: string }) =>
+export const make = (config: {
+  readonly table: string
+  readonly value: string
+  readonly label: string
+  readonly href?: ((value: string) => string) | undefined
+}) =>
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     const options = sql<{ value: string | number; label: string }>`
       SELECT ${sql(config.value)} AS value, ${sql(config.label)} AS label
       FROM ${sql(config.table)} ORDER BY ${sql(config.label)}`.pipe(
-        Effect.map((rows) => rows.map((r) => ({ value: String(r.value), label: r.label })))
+        Effect.map((rows) => rows.map((r): Option => {
+          const value = String(r.value)
+          return config.href ? { value, label: r.label, href: config.href(value) } : { value, label: r.label }
+        }))
       )
     return { table: config.table, options } satisfies Lookup
   })

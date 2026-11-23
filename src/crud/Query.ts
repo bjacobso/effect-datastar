@@ -58,6 +58,31 @@ export interface QueryDef<Sortable extends string, FilterKey extends string> {
   readonly toSearchParams: (q: ListQuery<Sortable, FilterKey>) => URLSearchParams
   /** Query from URL search params. Lenient: invalid or unknown params fall back to defaults. */
   readonly fromSearchParams: (params: URLSearchParams) => ListQuery<Sortable, FilterKey>
+  /**
+   * The same query with one `eq` filter fixed by the server (e.g. a "has many"
+   * view locked to `teamId = 3`). The client-facing schema drops that filter and
+   * rejects signals that try to set it.
+   */
+  readonly lock: <L extends FilterKey>(key: L) => Locked<Sortable, FilterKey, L>
+}
+
+/** A query with filter `L` fixed server-side. */
+export interface Locked<Sortable extends string, FilterKey extends string, L extends FilterKey> {
+  readonly key: L
+  readonly field: FilterInfo
+  /** Client signals schema: no `filters[L]`, and decoding fails if it is present. */
+  readonly schema: Schema.Codec<ListQuery<Sortable, Exclude<FilterKey, L>>, ListQuery<Sortable, Exclude<FilterKey, L>>>
+  readonly initial: ListQuery<Sortable, Exclude<FilterKey, L>>
+  /** The filters the client may still use. */
+  readonly filters: ReadonlyArray<FilterInfo>
+  /**
+   * Validate a lock value (e.g. a path param) against the field's own schema.
+   * Returns the canonical filter string, or `undefined` if it is empty, `null`
+   * or not a valid value of the field.
+   */
+  readonly parse: (raw: string) => string | undefined
+  /** The full query the server runs: the client's query plus the lock. */
+  readonly apply: (q: ListQuery<Sortable, Exclude<FilterKey, L>>, value: string) => ListQuery<Sortable, FilterKey>
 }
 
 /** The subset of the `sql` tag we use. */
@@ -161,7 +186,37 @@ export const make = <
     }
   }
 
+  const lock = <L extends FK>(key: L): Locked<Sortable, FK, L> => {
+    const field = filters.find((f) => f.key === key)
+    if (field === undefined || field.operator !== "eq") throw new Error(`Query.lock: "${key}" is not an eq filter`)
+    const rest = filters.filter((f) => f.key !== key)
+    const { [key]: _, ...restFilters } = initial.filters
+    const decodeField = Schema.decodeUnknownExit(field.schema as Schema.Codec<unknown, unknown>)
+    return {
+      key,
+      field,
+      filters: rest,
+      schema: Schema.Struct({
+        ...pieces,
+        filters: Schema.Struct({
+          ...Object.fromEntries(rest.map((f) => [f.key, filterSchemas[f.key]!])),
+          [key]: Schema.optionalKey(Schema.Never)
+        })
+      }) as unknown as Locked<Sortable, FK, L>["schema"],
+      initial: { ...initial, filters: restFilters as ListQuery<Sortable, Exclude<FK, L>>["filters"] },
+      parse: (raw) => {
+        if (raw === "" || raw === NULL) return undefined
+        if (Schema.decodeUnknownExit(filterSchemas[key]!)(raw)._tag !== "Success") return undefined
+        const value = field.kind === "boolean" ? raw === "true" : field.kind === "number" ? Number(raw) : raw
+        const decoded = decodeField(value)
+        return decoded._tag === "Success" && decoded.value !== null ? String(value) : undefined
+      },
+      apply: (q, value) => ({ ...q, filters: { ...q.filters, [key]: value } }) as ListQuery<Sortable, FK>
+    }
+  }
+
   return {
+    lock,
     schema,
     initial,
     toSearchParams,
