@@ -62,6 +62,8 @@ const { values: args } = parseArgs({
     workers: { type: "string", default: String(Math.max(2, Math.min(6, cpus().length - 4))) },
     port: { type: "string", default: "4300" },
     orgs: { type: "string", default: "10" },
+    /** Write to the first N organizations only (default: all). */
+    "write-orgs": { type: "string" },
     "open-concurrency": { type: "string", default: "100" },
     "poll-interval": { type: "string", default: "100 millis" },
     grace: { type: "string", default: "5" },
@@ -83,6 +85,7 @@ const serverCount = Number(args.servers)
 const workerCount = Number(args.workers)
 const basePort = Number(args.port)
 const orgCount = Number(args.orgs)
+const writeOrgs = Number(args["write-orgs"] ?? args.orgs)
 const openConcurrency = Number(args["open-concurrency"])
 const grace = Number(args.grace)
 const label = args.label ?? `${scenario}-${streams}s-${scenario === "burst" ? `b${burst}` : `r${rate}`}-${serverCount}p`
@@ -448,7 +451,7 @@ const program = Effect.gen(function*() {
   /** One write in a random organization, on a server chosen round-robin. */
   const write = Effect.gen(function*() {
     const s = ++seq
-    const org = pick(orgs)
+    const org = pick(orgs.slice(0, writeOrgs))
     const server = s % serverCount
     const port = ports[server]!
     const cookie = org.cookies[0]!
@@ -675,7 +678,7 @@ const program = Effect.gen(function*() {
     label,
     scenario,
     machine: { cpu: cpus()[0]?.model, cores: cpus().length, memoryGB: Math.round(totalmem() / 2 ** 30), node: process.version },
-    options: { streams, rate, duration, burst, burstConcurrency, slow: slowFraction, servers: serverCount, workers: workers.length, orgs: orgCount },
+    options: { streams, rate, duration, burst, burstConcurrency, writeOrgs, slow: slowFraction, servers: serverCount, workers: workers.length, orgs: orgCount },
     tabs: { total: streams, distinctViews: distinct, slow: specs.filter((s) => s.slow).length },
     open: { seconds: openSeconds, connected: sum((r) => r.connected), failed: sum((r) => r.failed), failures: [...new Set(reports.flatMap((r) => r.failures))], ttfe: percentiles(merge((r) => r.ttfe)) },
     writes: { total: totalWrites, errors: writeErrors, errorSamples, byKind: writes, seconds: writeSeconds, perSecond: Math.round((totalWrites / writeSeconds) * 10) / 10 },

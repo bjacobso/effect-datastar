@@ -254,8 +254,9 @@ const report = (): WorkerReport => {
         continue
       }
       // A concurrent write moved the row off this page (an insert pushed it to the next
-      // page, a bulk role change took it out of a role filter): not a miss.
-      if (d.kind === "update" && c.spec.kind === "list" && !c.visible.has(d.ids[0]!)) {
+      // page, a bulk role change took it out of a role filter), or later inserts handled in
+      // the same batch pushed a new row off page 1 before it was ever rendered: not a miss.
+      if ((d.kind === "update" || d.kind === "insert") && c.spec.kind === "list" && !c.visible.has(d.ids[0]!)) {
         moved++
         continue
       }
