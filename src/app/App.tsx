@@ -1,9 +1,10 @@
 /**
  * App composition, shared by `main.tsx` and the tests.
  */
-import { Layer } from "effect"
+import { type Duration, Layer } from "effect"
 import { HttpRouter, HttpServerResponse, HttpStaticServer } from "effect/http"
-import { Reactivity } from "effect/reactivity"
+import * as DistributedReactivity from "../reactivity/DistributedReactivity.ts"
+import * as SqliteBroadcast from "../reactivity/SqliteBroadcast.ts"
 import * as Db from "./Db.ts"
 import { Teams } from "./Teams.tsx"
 import { Users } from "./Users.tsx"
@@ -19,9 +20,18 @@ export const Routes = Layer.mergeAll(
 /**
  * Shared infrastructure. Provided outside `serve` so mutations and live views
  * share one `Reactivity` instance.
+ *
+ * That `Reactivity` also broadcasts through the database, so several server
+ * processes on the same SQLite file update each other's live views.
  */
-export const Infra = (db: { readonly filename: string; readonly seed?: boolean }) =>
+export const Infra = (db: {
+  readonly filename: string
+  readonly seed?: boolean
+  /** How often to poll for other processes' invalidations (default 100 millis). */
+  readonly pollInterval?: Duration.Input
+}) =>
   Layer.mergeAll(Users.layer, Teams.layer).pipe(
-    Layer.provideMerge(Db.layer(db)),
-    Layer.provideMerge(Reactivity.layer)
+    Layer.provideMerge(DistributedReactivity.layer),
+    Layer.provide(SqliteBroadcast.layer({ pollInterval: db.pollInterval })),
+    Layer.provideMerge(Db.layer(db))
   )
