@@ -87,8 +87,9 @@ the query string. Its query lives in its signals and resets on reload.
   - `Field.ts`, `Form.ts`: field metadata, form drafts (with input coercion) and per-field errors
   - `components.tsx`: generic filter bar, sortable table, pagination, form fields and dialog (`@kitajs/html`)
   - `Feedback.tsx`: toast and unexpected-error patches
-- `src/reactivity/`: `Reactivity` across processes (`Broadcast`, `DistributedReactivity`, `SqliteBroadcast`)
-- `src/app/`: the `users` and `teams` resources, the team detail page with embedded members (`TeamDetail.tsx`), migrations (`Db.ts`) and app composition (`App.tsx`)
+  - `Api.ts`: a JSON `HttpApiGroup` (list, get, create, update, delete) from a resource
+- `src/reactivity/`: `Reactivity` across processes (`Broadcast`, `DistributedReactivity`, `SqliteBroadcast`), and `Payload.ts` for invalidations that say what changed
+- `src/app/`: the `users` and `teams` resources, the team detail page with embedded members (`TeamDetail.tsx`), the JSON API (`Api.ts`), migrations (`Db.ts`) and app composition (`App.tsx`)
 - `test/`: unit, in-process HTTP, and browser (`test/e2e`) tests
 
 ## How live updates work
@@ -116,7 +117,8 @@ the request and Datastar cancels the previous stream.
 `test/queries.test.ts` counts SQL statements per mutation with six open views:
 renaming a visible user went from 19 to 5, editing a user no view shows from 19
 to 2, inserts and deletes from 19 to 13 (team lookups are no longer re-read),
-and a team rename stays at 19.
+and a team rename is 20 (19, plus reading the previous version of the team:
+see below).
 
 ### Across server processes
 
@@ -147,6 +149,92 @@ Layer.mergeAll(Users.layer, Teams.layer).pipe(
 PORT=3000 npm start & PORT=3001 npm start   # same app.db; edit in one, watch the other
 ```
 
+### Cross-process row patches
+
+A rename on server A is a single-row patch on server B, as it is on A: the
+`Change` travels with the broadcast.
+
+- `InvalidationPayload` (`src/reactivity/Payload.ts`) is a generic side channel
+  next to `Reactivity`: `invalidateUnsafe(keys, payload)` runs the handlers
+  with `current()` returning the payload (a JSON value). `DistributedReactivity`
+  provides it, publishes the payload with the keys, and sets it while applying
+  a received message. It knows nothing about repos.
+- A broadcast message is `{ origin, keys, payload? }`; the SQLite table has a
+  nullable `payload` column (added on startup to tables from older versions).
+- `Repo` sends `{ table: "users", change: { _tag: "Update", id: 42, columns: ["name"] } }`
+  (the id encoded with the id field's JSON codec), and its streams decode the
+  payload of whatever invalidation woke them. Local and remote changes take the
+  same path. No payload (older senders, bare `Reactivity.invalidate`) or one
+  that doesn't decode means a full re-query.
+- To report changed columns, an update reads the row's previous version. Only
+  one process knows whether it has open views, so with a cross-process
+  `Reactivity` the previous version is always read (one SELECT per update).
+
+`test/crossprocess.test.ts` runs two apps on one SQLite file, with a users view
+open on B only. Statements B runs per mutation on A:
+
+| Mutation on A                          | Before (bare keys) | After             |
+| -------------------------------------- | ------------------ | ----------------- |
+| rename a visible user                  | page query + COUNT | 1 row re-fetch    |
+| change a filtered column (`role`)      | page query + COUNT | page query + COUNT |
+| keys-only message from an older sender | page query + COUNT | page query + COUNT |
+
+**Gaps.** A process stalled for longer than the retention (a long GC pause, a
+suspended VM) would miss pruned rows. Each poll reads the newest assigned id
+(`sqlite_sequence`) and the rows after the cursor in one statement; every id in
+between was assigned, so fewer rows than ids means some were pruned. The
+subscription then delivers a `Gap`, and `DistributedReactivity` re-runs every
+key registered in that process (it tracks `registerUnsafe`, `query` and
+`stream` registrations), so every live view re-queries.
+
+## JSON API
+
+`src/crud/Api.ts` derives an Effect `HttpApiGroup` from a resource, and
+`src/app/Api.ts` mounts the users and teams groups under `/api`, with the
+OpenAPI document at `/api/openapi.json` and a Scalar reference at `/api/docs`:
+
+```ts
+export const UsersApi = Api.make(Users)
+export const TeamsApi = Api.make(Teams)
+
+export class AppApi extends HttpApi.make("effect-datastar")
+  .add(UsersApi.group)
+  .add(TeamsApi.group)
+  .prefix("/api") {}
+
+export const ApiRoutes = Layer.mergeAll(
+  HttpApiBuilder.layer(AppApi, { openapiPath: "/api/openapi.json" }),
+  HttpApiScalar.layer(AppApi, { path: "/api/docs" })
+).pipe(Layer.provide([UsersApi.layer(AppApi), TeamsApi.layer(AppApi)]))
+```
+
+| Endpoint                | Success                        | Errors        |
+| ----------------------- | ------------------------------ | ------------- |
+| `GET    /api/users`     | `{ rows, total, page, pages }` | 400           |
+| `GET    /api/users/:id` | the row                        | 400, 404      |
+| `POST   /api/users`     | 201, the row                   | 400, 409      |
+| `PUT    /api/users/:id` | the row                        | 400, 404, 409 |
+| `DELETE /api/users/:id` | 204                            | 400, 404, 409 |
+
+```sh
+curl 'localhost:3000/api/users?role=admin&teamId=null&sort=name&dir=asc'
+curl -X POST localhost:3000/api/users -H 'content-type: application/json' \
+  -d '{"name":"Ada","email":"ada@example.com","role":"admin","teamId":1,"active":true}'
+# 201 the new row; the same request again:
+# 409 {"_tag":"Conflict","message":"Email is already taken","fields":{"email":"Email is already taken"}}
+```
+
+- The list takes the URL-state params (`page`, `pageSize`, `sort`, `dir`, one
+  per filter) with the same per-field schemas as the live view's signals
+  (`Query.params`). Where the page falls back to defaults, the API answers 400.
+- Bodies are the model's `jsonCreate` / `jsonUpdate` (an update replaces every
+  editable field, like the edit dialog); rows are the model's `json` variant.
+- `ValidationError` (400) has one message per invalid field or param, all of
+  them; `NotFound` (404); `Conflict` (409) for unique and foreign key
+  violations, with the resource's `messages`.
+- Mutations go through the resource's `Repo`, so open live views update (in
+  every process), exactly as for the HTML forms.
+
 ## URL state
 
 `GET /users?teamId=3&sort=name&dir=asc` renders that query on the server, so the
@@ -154,3 +242,6 @@ first paint has the table. Each new live stream patches a local signal
 (`users._url`) with the canonical URL, which the page mirrors into the address
 bar with `history.replaceState`. Both directions use the same `Query` config:
 defaults are left out of the URL, and invalid params fall back to defaults.
+Filter values are checked against the field's own schema, so `?teamId=1.5`
+(`TeamId` is an integer) is dropped like `?role=root`, and the same value in
+the signals is rejected as an invalid query.
