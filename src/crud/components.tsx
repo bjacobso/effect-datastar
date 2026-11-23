@@ -12,17 +12,17 @@ import type { ReactNode } from "react"
 import * as ds from "../datastar/Attrs.ts"
 import type { SignalPath } from "../datastar/Attrs.ts"
 import * as Island from "../islands/Island.tsx"
-import { Dialog, Select } from "../islands/islands.tsx"
+import { DateInput, Dialog, MultiSelect, MultiSelectValue, Select } from "../islands/islands.tsx"
 import { Button } from "../ui/Button.tsx"
 import { Badge } from "../ui/display.tsx"
-import { styles as form } from "../ui/form.tsx"
+import { styles as form, TextArea } from "../ui/form.tsx"
 import { Icon } from "../ui/icons.tsx"
 import { styles as overlay } from "../ui/overlay.tsx"
 import { shared } from "../ui/shared.ts"
 import { color, font, motion, radius, shadow, size, space } from "../ui/theme/tokens.stylex.ts"
 import type * as Field from "./Field.ts"
 import type { Option } from "./Lookup.ts"
-import { type FilterInfo, NULL } from "./Query.ts"
+import { type FilterInfo, NULL, rangeKeys } from "./Query.ts"
 import * as UrlState from "./UrlState.ts"
 
 const at = (base: SignalPath, ...rest: Array<string>) => [base, ...rest].join(".") as SignalPath
@@ -76,7 +76,10 @@ export const FilterBar = (props: {
   readonly lookups?: Lookups | undefined
 }) => (
   <div {...stylex.props(styles.filters)}>
-    {props.filters.map((f) => (
+    {props.filters.map((f) =>
+      f.operator === "range"
+        ? <RangeFilter key={f.key} prefix={props.prefix} filter={f} query={props.query} />
+        : (
       <label key={f.key} {...stylex.props(styles.filter)}>
         <span {...stylex.props(styles.filterLabel)}>{f.label}</span>
         {f.operator === "contains"
@@ -97,9 +100,39 @@ export const FilterBar = (props: {
           )
           : <FilterSelect prefix={props.prefix} filter={f} query={props.query} lookup={props.lookups?.[f.key]} />}
       </label>
-    ))}
+        )
+    )}
   </div>
 )
+
+/**
+ * A date range filter: two date picker islands bound to `filters.${key}From` and
+ * `filters.${key}To` (either may be blank). Islands emit `change` on their host.
+ */
+export const RangeFilter = (props: { readonly prefix: string; readonly filter: FilterInfo; readonly query: SignalPath }) => {
+  const f = props.filter
+  const [from, to] = rangeKeys(f.key)
+  const resetPage = ds.on("change", `${ref(at(props.query, "page"))} = 1`)
+  return (
+    <div role="group" aria-label={f.label} {...stylex.props(styles.filter, styles.range)}>
+      <span {...stylex.props(styles.filterLabel)}>{f.label}</span>
+      <span {...stylex.props(styles.rangeInputs)}>
+        <Island.Mount
+          island={DateInput}
+          id={filterId(props.prefix, from)}
+          props={{ label: `${f.label} from`, placeholder: "From" }}
+          attrs={ds.merge(ds.bind(at(props.query, "filters", from)), resetPage)}
+        />
+        <Island.Mount
+          island={DateInput}
+          id={filterId(props.prefix, to)}
+          props={{ label: `${f.label} to`, placeholder: "To" }}
+          attrs={ds.merge(ds.bind(at(props.query, "filters", to)), resetPage)}
+        />
+      </span>
+    </div>
+  )
+}
 
 // ---------------------------------------------------------------------------
 // Table
@@ -109,6 +142,7 @@ export const formatCell = (field: Field.FieldInfo, value: unknown): string => {
   if (value === null || value === undefined) return "—"
   if (typeof value === "boolean") return value ? "✓" : "✗"
   if (DateTime.isDateTime(value)) return DateTime.formatIso(value).slice(0, 16).replace("T", " ")
+  if (Array.isArray(value)) return value.join(", ")
   return String(value)
 }
 
@@ -118,8 +152,53 @@ export const CellValue = (props: { readonly field: Field.FieldInfo; readonly val
   if (value === null || value === undefined) return <span {...stylex.props(shared.subtle)}>—</span>
   if (typeof value === "boolean") return <Badge tone={value ? "success" : "neutral"}>{value ? "Yes" : "No"}</Badge>
   if (field.kind === "enum") return <Badge tone="accent">{String(value)}</Badge>
-  if (DateTime.isDateTime(value)) return <span {...stylex.props(styles.date)}>{formatCell(field, value)}</span>
+  if (DateTime.isDateTime(value) || field.kind === "date") {
+    return <span {...stylex.props(styles.date)}>{formatCell(field, value)}</span>
+  }
+  if (field.widget === "color" && typeof value === "string") {
+    return (
+      <span {...stylex.props(styles.colorValue)}>
+        <span aria-hidden="true" {...stylex.props(styles.swatch)} style={{ backgroundColor: value }} />
+        <span {...stylex.props(shared.mono)}>{value}</span>
+      </span>
+    )
+  }
   return <span>{formatCell(field, value)}</span>
+}
+
+/**
+ * The related rows of a many-to-many field as chips, in their color (a soft tint of
+ * it), linked to their pages: a user's tags.
+ */
+export const Chips = (props: { readonly values: ReadonlyArray<unknown>; readonly options: ReadonlyArray<Option> }) => {
+  if (props.values.length === 0) return <span {...stylex.props(shared.subtle)}>—</span>
+  const byValue = new Map(props.options.map((o) => [o.value, o]))
+  return (
+    <span {...stylex.props(styles.chips)}>
+      {props.values.map((v) => {
+        const option = byValue.get(String(v))
+        const tint = option?.color === undefined
+          ? undefined
+          : {
+            backgroundColor: `color-mix(in srgb, ${option.color} 16%, transparent)`,
+            borderColor: `color-mix(in srgb, ${option.color} 50%, transparent)`
+          }
+        const content = (
+          <>
+            <span
+              aria-hidden="true"
+              {...stylex.props(styles.chipDot)}
+              style={option?.color === undefined ? {} : { backgroundColor: option.color }}
+            />
+            {option?.label ?? "?"}
+          </>
+        )
+        return option?.href
+          ? <a key={String(v)} href={option.href} data-chip="" {...stylex.props(styles.chip, styles.chipLink)} style={tint}>{content}</a>
+          : <span key={String(v)} data-chip="" {...stylex.props(styles.chip)} style={tint}>{content}</span>
+      })}
+    </span>
+  )
 }
 
 export const SortHeader = (props: {
@@ -316,35 +395,46 @@ const invalidAttr = (props: FieldProps) =>
   ds.attr("aria-invalid", `${ref(at(props.errors, props.field.key))} ? 'true' : 'false'`)
 
 /**
- * A select field. Relations (options from a lookup) are a ui-sdk Select island bound to
- * the draft; enums are a native select. Both keep the same id, so a live view can
- * replace either when its options change.
+ * A select field: a ui-sdk Select island bound to the draft, for relations (options
+ * from a lookup) and enums alike, or a ui-sdk Combobox (multiple) island for a
+ * many-to-many field. Each keeps the same id, so a live view can replace it when its
+ * options change.
  */
 export const FieldSelect = (props: FieldProps) => {
   const id = fieldId(props.prefix, props.field.key)
-  if (props.lookup !== undefined) {
+  const attrs = ds.merge(ds.bind(at(props.draft, props.field.key)), invalidAttr(props))
+  if (props.field.kind === "ids") {
     return (
       <Island.Mount
-        island={Select}
+        island={MultiSelect}
         id={id}
         props={{
-          options: props.lookup.map((o) => ({ value: o.value, label: o.label })),
-          label: props.field.label,
-          emptyLabel: props.field.nullable ? `No ${props.field.label.toLowerCase()}` : undefined
+          options: (props.lookup ?? []).map((o) =>
+            o.color === undefined ? { value: o.value, label: o.label } : { value: o.value, label: o.label, color: o.color }
+          ),
+          label: props.field.label
         }}
-        attrs={ds.merge(ds.bind(at(props.draft, props.field.key)), invalidAttr(props))}
+        // Not `data-bind`: Datastar binds an array signal as one checkbox per element
+        // (`tags.0`, `tags.1`, ...). The value goes in as JSON and comes back on `change`.
+        attrs={ds.merge(
+          ds.attr(MultiSelectValue, `JSON.stringify(${ref(at(props.draft, props.field.key))})`),
+          ds.on("change", `${ref(at(props.draft, props.field.key))} = [...evt.target.value]`),
+          invalidAttr(props)
+        )}
       />
     )
   }
   return (
-    <select
+    <Island.Mount
+      island={Select}
       id={id}
-      {...ds.merge(ds.bind(at(props.draft, props.field.key)), invalidAttr(props))}
-      {...stylex.props(shared.control, styles.select)}
-    >
-      {props.field.nullable && <option value="">—</option>}
-      {fieldOptions(props.field, props.lookup).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-    </select>
+      props={{
+        options: fieldOptions(props.field, props.lookup).map((o) => ({ value: o.value, label: o.label })),
+        label: props.field.label,
+        emptyLabel: props.field.nullable ? `No ${props.field.label.toLowerCase()}` : undefined
+      }}
+      attrs={attrs}
+    />
   )
 }
 
@@ -353,16 +443,36 @@ const FieldError = (props: { readonly error: SignalPath }) => (
   <small aria-live="polite" {...ds.text(ref(props.error))} {...stylex.props(form.error, styles.fieldError)} />
 )
 
+/** Widgets that are islands: no labelable element, so they are named by `aria-label`. */
+const islandWidgets: ReadonlyArray<Field.FieldInfo["widget"]> = ["select", "multiselect", "date"]
+
+/**
+ * One form field, its widget derived from the schema (`Field.info`): a text, email,
+ * number or color input, a ui-sdk Textarea (server-rendered; Datastar binds the
+ * `<textarea>`), a switch (a native checkbox, see below), or an island (select,
+ * multi-select, date picker).
+ *
+ * Switches are server-rendered `<input type="checkbox" role="switch">`s styled as the
+ * ui-sdk Switch, not islands: `data-bind` already speaks booleans to a checkbox, the
+ * form works before any island code loads, and a ui-sdk Switch would only add a chunk
+ * and a host round trip for the same state.
+ */
 export const FormField = (props: FieldProps) => {
   const f = props.field
+  const id = fieldId(props.prefix, f.key)
   const bind = ds.bind(at(props.draft, f.key))
+  const bound = ds.merge(bind, invalidAttr(props))
   const error = at(props.errors, f.key)
-  if (f.widget === "checkbox") {
+  if (f.widget === "checkbox" || f.widget === "switch") {
+    const isSwitch = f.widget === "switch"
     return (
       <div {...stylex.props(form.field)}>
-        <label {...stylex.props(form.check)}>
-          <input type="checkbox" {...bind} {...stylex.props(form.checkbox, shared.focusRing)} />
+        <label {...stylex.props(isSwitch ? form.switchRow : form.check)}>
+          {!isSwitch && <input id={id} type="checkbox" {...bind} {...stylex.props(form.checkbox, shared.focusRing)} />}
           <span {...stylex.props(form.label)}>{f.label}</span>
+          {isSwitch && (
+            <input id={id} type="checkbox" role="switch" {...bind} {...stylex.props(form.switch, shared.focusRing)} />
+          )}
         </label>
         <FieldError error={error} />
       </div>
@@ -371,17 +481,21 @@ export const FormField = (props: FieldProps) => {
   const input = (() => {
     switch (f.widget) {
       case "select":
+      case "multiselect":
         return <FieldSelect {...props} />
+      case "date":
+        return <Island.Mount island={DateInput} id={id} props={{ label: f.label, placeholder: "No date" }} attrs={bound} />
       case "textarea":
-        return <textarea {...ds.merge(bind, invalidAttr(props))} {...stylex.props(shared.control, form.textarea)} />
+        return <TextArea id={id} rows={3} {...bound} />
+      case "color":
+        return <input id={id} type="color" {...bound} {...stylex.props(shared.control, styles.color)} />
       case "readonly":
-        return <input disabled {...bind} {...stylex.props(shared.control)} />
+        return <input id={id} disabled {...bind} {...stylex.props(shared.control)} />
       default:
-        return <input type={f.widget} {...ds.merge(bind, invalidAttr(props))} {...stylex.props(shared.control)} />
+        return <input id={id} type={f.widget} {...bound} {...stylex.props(shared.control)} />
     }
   })()
-  // A relation select is an island (no labelable element), so it is named by `aria-label`.
-  const Wrapper = f.widget === "select" && props.lookup !== undefined ? "div" : "label"
+  const Wrapper = islandWidgets.includes(f.widget) ? "div" : "label"
   return (
     <Wrapper {...stylex.props(form.field)}>
       <span {...stylex.props(form.label)}>{f.label}</span>
@@ -550,7 +664,37 @@ const styles = stylex.create({
   rowActions: { display: "inline-flex", gap: space["--dw-space-1"] },
   dangerText: { color: { default: color["--dw-danger"], ":hover": color["--dw-danger"] } },
   empty: { textAlign: "center", color: color["--dw-text-muted"], paddingBlock: space["--dw-space-10"] },
-  date: { fontVariantNumeric: "tabular-nums", color: color["--dw-text-muted"] },
+  date: { fontVariantNumeric: "tabular-nums", color: color["--dw-text-muted"], whiteSpace: "nowrap" },
+  range: { flexGrow: 2, flexBasis: "300px" },
+  rangeInputs: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: space["--dw-space-2"] },
+  color: { paddingBlock: "3px", paddingInline: "4px", width: "72px", cursor: "pointer" },
+  colorValue: { display: "inline-flex", alignItems: "center", gap: space["--dw-space-2"] },
+  swatch: {
+    width: "14px",
+    height: "14px",
+    borderRadius: radius["--dw-radius-sm"],
+    boxShadow: `inset 0 0 0 1px rgb(0 0 0 / 0.12)`
+  },
+  chips: { display: "inline-flex", flexWrap: "wrap", gap: "4px" },
+  chip: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "5px",
+    height: "22px",
+    paddingInline: "8px",
+    borderWidth: "1px",
+    borderStyle: "solid",
+    borderColor: color["--dw-border"],
+    borderRadius: radius["--dw-radius-full"],
+    backgroundColor: color["--dw-neutral-soft"],
+    color: color["--dw-text"],
+    fontSize: font["--dw-text-xs"],
+    fontWeight: font["--dw-weight-medium"],
+    whiteSpace: "nowrap",
+    textDecoration: "none"
+  },
+  chipLink: { filter: { default: "none", ":hover": "brightness(0.96)" } },
+  chipDot: { width: "7px", height: "7px", borderRadius: radius["--dw-radius-full"], backgroundColor: "currentColor" },
   pagination: {
     display: "flex",
     flexWrap: "wrap",

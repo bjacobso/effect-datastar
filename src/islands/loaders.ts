@@ -8,5 +8,7 @@ import type { Island } from "./Island.tsx"
 export const loaders: Readonly<Record<string, () => Promise<Island<never>>>> = {
   select: () => import("./select.tsx").then((m) => m.Select as Island<never>),
   dialog: () => import("./dialog.tsx").then((m) => m.Dialog as Island<never>),
-  theme: () => import("./theme.tsx").then((m) => m.Theme as Island<never>)
+  theme: () => import("./theme.tsx").then((m) => m.Theme as Island<never>),
+  date: () => import("./date.tsx").then((m) => m.DateInput as Island<never>),
+  multiselect: () => import("./multiselect.tsx").then((m) => m.MultiSelect as Island<never>)
 }

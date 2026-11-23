@@ -120,6 +120,15 @@ export interface Target<Id> {
 type Relations<M extends ModelLike> = {
   readonly [K in Fields<M>]?: K extends keyof M["Type"] ? Target<NonNullable<M["Type"][K]>> : never
 }
+/**
+ * Many-to-many fields (`ManyToMany.Ids`) -> the resource their ids point at. The field's
+ * elements must be the target's ids, and a field that isn't an array is a type error.
+ */
+type ManyToManys<M extends ModelLike> = {
+  readonly [K in Fields<M>]?: K extends keyof M["Type"]
+    ? M["Type"][K] extends ReadonlyArray<infer E> ? Target<E> : never
+    : never
+}
 type RelationServices<R> = { [K in keyof R]: R[K] extends { readonly Lookup: Context.Key<infer I, any> } ? I : never }[keyof R]
 type RelationNames<R> = { [K in keyof R]: R[K] extends { readonly name: infer N extends string } ? N : never }[keyof R]
 type RelationTenants<R> = { [K in keyof R]: R[K] extends { readonly "~tenant"?: infer T } ? Exclude<T, undefined> : never }[keyof R]
@@ -281,7 +290,7 @@ export const define = <
   L = never
 >(config: Config<Name, M, Id, Sortable, Filters & Record<string, Query.Operator>, TC, T, L>) => {
   const { name, model, idColumn } = config
-  type FK = keyof Filters & string
+  type FK = Query.Keys<Filters>
   type Row = M["Type"]
   type IdType = M["fields"][Id]["Type"]
 
@@ -327,7 +336,18 @@ export const define = <
   const layerWith = (references: ReadonlyArray<readonly [string, Scope.ReferenceTarget]>) =>
     Layer.mergeAll(
       Layer.effect(RepoTag, Repo.make(model, { table: name, idColumn, query, scope, references })),
-      Layer.effect(LookupTag, Lookup.make({ table: name, value: idColumn, label: config.display, href, scope }))
+      Layer.effect(
+        LookupTag,
+        Lookup.make({
+          table: name,
+          value: idColumn,
+          label: config.display,
+          href,
+          scope,
+          // A color field (`Schemas.Color`) colors this resource's chips in other resources' tables.
+          color: Form.fields(model).find((f) => f.widget === "color")?.key
+        })
+      )
     )
   const layer = layerWith([])
 
@@ -406,6 +426,10 @@ export const define = <
       const custom = (config.columns as Record<string, ((row: Row, l: Components.Lookups) => ReactNode) | undefined>)
         ?.[field.key]
       if (custom) return (row: Row) => custom(row, lookups)
+      if (field.kind === "ids" && relations.some(([k]) => k === field.key)) {
+        const options = lookups[field.key] ?? []
+        return (row: Row) => <Components.Chips values={(get(row, field.key) ?? []) as ReadonlyArray<unknown>} options={options} />
+      }
       if (relations.some(([k]) => k === field.key)) {
         const byValue = new Map((lookups[field.key] ?? []).map((o) => [o.value, o]))
         return (row: Row) => {
@@ -594,9 +618,13 @@ export const define = <
         field: path("bulk", "field"),
         value: path("bulk", "value")
       }
-      /** The fields "Set <field>…" offers (not the lock: an embed's rows keep it). */
+      /**
+       * The fields "Set <field>…" offers: not the lock (an embed's rows keep it), and not a
+       * many-to-many field (its value is a set of ids in a join table, which a one-value
+       * bulk select can't express, and `Repo.updateMany` doesn't write).
+       */
       const setFields = (config.bulk?.set ?? []).flatMap((key) =>
-        key === lockKey ? [] : fields.filter((f) => f.key === key)
+        key === lockKey ? [] : fields.filter((f) => f.key === key && f.kind !== "ids")
       )
 
       const readQuery = Effect.map(readSignals(ns, Schema.Struct({ query: options.query.schema })), (s) => s.query)
@@ -630,8 +658,8 @@ export const define = <
       }
 
       /** Form selects whose options come from lookups; replaced so `data-bind` re-applies the signal value. */
-      const fieldSelects = (lookups: Components.Lookups): Array<Datastar.DatastarEvent> =>
-        scopedRelations.flatMap(([key]) => {
+      const fieldSelects = (lookups: Components.Lookups, only?: ReadonlySet<string>): Array<Datastar.DatastarEvent> =>
+        scopedRelations.filter(([key]) => only === undefined || only.has(key)).flatMap(([key]) => {
           const field = fields.find((f) => f.key === key)
           return field
             ? [Datastar.patchElements(
@@ -643,8 +671,8 @@ export const define = <
             : []
         })
       /** Filter and form selects whose options come from lookups. */
-      const relationSelects = (lookups: Components.Lookups): Array<Datastar.DatastarEvent> => [
-        ...scopedRelations.flatMap(([key]) => {
+      const relationSelects = (lookups: Components.Lookups, only?: ReadonlySet<string>): Array<Datastar.DatastarEvent> => [
+        ...scopedRelations.filter(([key]) => only === undefined || only.has(key)).flatMap(([key]) => {
           const filter = options.query.filters.find((f) => f.key === key)
           return filter
             ? [Datastar.patchElements(
@@ -653,7 +681,7 @@ export const define = <
             )]
             : []
         }),
-        ...fieldSelects(lookups)
+        ...fieldSelects(lookups, only)
       ]
 
       // --- handlers ----------------------------------------------------------
@@ -671,21 +699,32 @@ export const define = <
           const q = yield* readQuery
           const full = options.full(q, lock)
           let lookups: Components.Lookups = {}
-          let lastOptions: string | undefined
+          const lastOptions = new Map<string, string>()
+          /** The table as last sent (`undefined` once rows were patched since). */
+          let lastTable: string | undefined
           let urlSent = false
+          // The related tables' keys, for the current tenant (`tags[orgId=1]`): another
+          // organization's tag changes don't wake this view.
           const dependsOn = yield* Effect.forEach(services, ([, l]) => l.key)
           return repo.live(full, { dependsOn }).pipe(
-            // Lookups load with the first page and whenever a related table changes.
-            Stream.mapEffect((event) =>
+            // Lookups load with the first page and whenever a related table changes (only
+            // the changed tables' lookups, when the repo can tell).
+            Stream.mapEffect((event): Effect.Effect<Repo.LiveEvent<Row>, SqlError.SqlError, T> =>
               event._tag === "Page" && event.reason !== "table"
                 ? Effect.map(lookupsFor(services), (loaded) => {
                   lookups = loaded
+                  return event
+                })
+                : event._tag === "Related"
+                ? Effect.map(lookupsFor(services.filter(([, l]) => event.tables.includes(l.table))), (loaded) => {
+                  lookups = { ...lookups, ...loaded }
                   return event
                 })
                 : Effect.succeed(event)
             ),
             Stream.map((event): Events => {
               if (event._tag === "Rows") {
+                lastTable = undefined
                 // Only these rows changed, in ways that can't move them: patch each `<tr>` by id.
                 return event.rows.map((row) => Datastar.patchElements(render(<RowView row={row} lookups={lookups} lock={lock} />)))
               }
@@ -694,14 +733,17 @@ export const define = <
                 // Out of range (e.g. after deleting the last row on the last page): clamp.
                 return Datastar.patchSignals({ [ns]: { query: { page: page.pages } } })
               }
-              const events = [
-                Datastar.patchElements(render(<TableView page={page} current={q} lookups={lookups} lock={lock} />))
-              ]
-              const key = JSON.stringify(lookups)
-              if (key !== lastOptions) {
-                lastOptions = key
-                events.push(...relationSelects(lookups))
-              }
+              const table = render(<TableView page={page} current={q} lookups={lookups} lock={lock} />)
+              // A related row changed (a renamed tag): the page is the same, so only a table
+              // that shows it renders differently. Others send nothing (but their selects).
+              const events = event._tag === "Related" && table === lastTable ? [] : [Datastar.patchElements(table)]
+              lastTable = table
+              // Re-send the selects of the relations whose options changed.
+              const changed = new Set(Object.keys(lookups).filter((k) => JSON.stringify(lookups[k]) !== lastOptions.get(k)))
+              for (const k of changed) lastOptions.set(k, JSON.stringify(lookups[k]))
+              if (changed.size > 0) events.push(...relationSelects(lookups, changed))
+              // Same page, same table: the ids and URL are as already sent.
+              if (event._tag === "Related" && events.length === 0) return events
               // The ids on this page, for "select all" and pruning the selection (see `Bulk`),
               // and once per stream the canonical URL (see `UrlState`).
               const local: Record<string, unknown> = { _page: pageIds(page.rows) }
@@ -1310,18 +1352,38 @@ export const define = <
    */
   const with_ = <
     const R extends Relations<M> = {},
-    const S extends ReadonlyArray<SectionInput<Row, IdType>> = readonly []
-  >(options: { readonly relations?: R; readonly sections?: S }) => {
-    const targets = Object.entries(options.relations ?? {}).flatMap(([key, target]) =>
-      target === undefined ? [] : [[key, target as Target<never>] as const]
-    )
+    const S extends ReadonlyArray<SectionInput<Row, IdType>> = readonly [],
+    const MM extends ManyToManys<M> = {}
+  >(options: {
+    readonly relations?: R
+    readonly sections?: S
+    /**
+     * Many-to-many fields -> the resource they point at: `{ tags: Tags }`. The field
+     * itself (`ManyToMany.Ids`) says where it is stored; this gives it options, labels
+     * (chips) and live updates when the target's rows change. Like a relation, every
+     * id written must be a row of the current tenant (`InvalidReference`).
+     */
+    readonly manyToMany?: MM
+  }) => {
+    // Many-to-many fields are relations too: lookups, `dependsOn`, selects re-sent on
+    // change, and references checked against the tenant.
+    const targets = [...Object.entries(options.relations ?? {}), ...Object.entries(options.manyToMany ?? {})]
+      .flatMap(([key, target]) => target === undefined ? [] : [[key, target as Target<never>] as const])
     const relations = targets.map(([key, target]) => [key, target.Lookup] as const)
     const references = targets.map(([key, target]) => [key, target.reference] as const)
     const sections: ReadonlyArray<SectionInput<Row, IdType>> = options.sections ?? []
     const spec: Spec<
       Name,
-      RelationNames<R> | EmbedTargets<S[number]>,
-      RepoOf<Name> | Reactivity.Reactivity | RelationServices<R> | SectionRequires<S[number]> | T | L | RelationTenants<R>,
+      RelationNames<R> | RelationNames<MM> | EmbedTargets<S[number]>,
+      | RepoOf<Name>
+      | Reactivity.Reactivity
+      | RelationServices<R>
+      | RelationServices<MM>
+      | SectionRequires<S[number]>
+      | T
+      | L
+      | RelationTenants<R>
+      | RelationTenants<MM>,
       ReturnType<typeof build>["resource"]
     > = {
       name,

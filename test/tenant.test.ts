@@ -115,14 +115,14 @@ describe("guessing another organization's ids", () => {
     expect(toasts((await acme.action("DELETE", `/users/${GLOBEX_USER}`)).events)).toEqual(["That user no longer exists"])
     expect(await globexUser(GLOBEX_USER)).toEqual(before)
 
-    const renamed = await acme.action("PUT", `/teams/${GLOBEX_TEAM}`, { teams: { draft: { id: GLOBEX_TEAM, name: "Hijacked" } } })
+    const renamed = await acme.action("PUT", `/teams/${GLOBEX_TEAM}`, { teams: { draft: { id: GLOBEX_TEAM, name: "Hijacked", description: "" } } })
     expect(toasts(renamed.events)).toEqual(["That team no longer exists"])
     expect(toasts((await acme.action("DELETE", `/teams/${GLOBEX_TEAM}`)).events)).toEqual(["That team no longer exists"])
     expect((await api(globex, "GET", `/api/teams/${GLOBEX_TEAM}`)).body.name).toBe("Infrastructure")
   })
 
   it("an empty team of another organization can't be deleted either", async () => {
-    const created = await api(globex, "POST", "/api/teams", { name: "Globex Empty" })
+    const created = await api(globex, "POST", "/api/teams", { name: "Globex Empty", description: "" })
     expect(created.status).toBe(201)
     expect(toasts((await acme.action("DELETE", `/teams/${created.body.id}`)).events)).toEqual(["That team no longer exists"])
     expect((await api(acme, "DELETE", `/api/teams/${created.body.id}`)).status).toBe(404)
@@ -161,7 +161,7 @@ describe("embeds (locked to a team) within the organization", () => {
         pageSize: 10,
         sort: "createdAt",
         dir: "desc",
-        filters: { name: "", email: "", role: "", active: "" },
+        filters: { name: "", email: "", role: "", active: "", tags: "", createdAtFrom: "", createdAtTo: "" },
         ...q
       }
     }
@@ -182,7 +182,7 @@ describe("embeds (locked to a team) within the organization", () => {
     const { events } = await acme.action(
       "POST",
       `/users?embed=members&scope=${GLOBEX_TEAM}`,
-      { members: { draft: { id: "", name: "Embedded Mole", email: "emole@example.com", role: "member", active: true } } }
+      { members: { draft: { id: "", name: "Embedded Mole", email: "emole@example.com", role: "member", active: true, startDate: "", tags: [] } } }
     )
     expect(toasts(events)).toEqual(["That team no longer exists"])
     expect(total(await globex.page("/users?name=Embedded"))).toBe(0)
@@ -204,7 +204,9 @@ describe("JSON API", () => {
       email: "hijacked@example.com",
       role: "admin",
       teamId: null,
-      active: true
+      active: true,
+      startDate: null,
+      tags: []
     })
     expect(put).toEqual({ status: 404, body: { _tag: "NotFound", message: `No user with id ${GLOBEX_USER}` } })
     expect((await api(acme, "DELETE", `/api/users/${GLOBEX_USER}`)).status).toBe(404)
@@ -212,7 +214,7 @@ describe("JSON API", () => {
   })
 
   it("a reference to another organization's team is a 409", async () => {
-    const body = { name: "Api Mole", email: "api.mole@example.com", role: "member", teamId: GLOBEX_TEAM, active: true }
+    const body = { name: "Api Mole", email: "api.mole@example.com", role: "member", teamId: GLOBEX_TEAM, active: true, startDate: null, tags: [] }
     expect(await api(acme, "POST", "/api/users", body)).toEqual({
       status: 409,
       body: { _tag: "Conflict", message: "That team no longer exists", fields: { teamId: "That team no longer exists" } }
@@ -227,6 +229,8 @@ describe("JSON API", () => {
       role: "member",
       teamId: null,
       active: true,
+      startDate: null,
+      tags: [],
       orgId: 2
     })
     expect(created.status).toBe(201)
@@ -236,9 +240,9 @@ describe("JSON API", () => {
 
   it("uniqueness is per organization, so it reveals nothing about the other one", async () => {
     const acmeEmail = (await api(acme, "GET", "/api/users/87")).body.email
-    const body = { name: "Same Email", email: acmeEmail, role: "member", teamId: null, active: true }
+    const body = { name: "Same Email", email: acmeEmail, role: "member", teamId: null, active: true, startDate: null, tags: [] }
     expect((await api(globex, "POST", "/api/users", body)).status).toBe(201)
-    expect((await api(globex, "POST", "/api/teams", { name: "Growth" })).status).toBe(201)
+    expect((await api(globex, "POST", "/api/teams", { name: "Growth", description: "" })).status).toBe(201)
   })
 })
 
@@ -246,12 +250,12 @@ describe("live updates", () => {
   it("another organization's changes never reach a stream, and don't wake it", async () => {
     const s = await acme.stream("/users/view", usersQuery())
     await s.until((e) => elements(e, "users-table") !== "")
-    await api(globex, "POST", "/api/users", { name: "Globex Live", email: "globex.live@example.com", role: "member", teamId: null, active: true })
-    await api(globex, "PUT", `/api/teams/${GLOBEX_TEAM}`, { name: "Infra Renamed" })
+    await api(globex, "POST", "/api/users", { name: "Globex Live", email: "globex.live@example.com", role: "member", teamId: null, active: true, startDate: null, tags: [] })
+    await api(globex, "PUT", `/api/teams/${GLOBEX_TEAM}`, { name: "Infra Renamed", description: "" })
     expect(await s.collect(300)).toEqual([])
 
     // Its own organization's change still arrives.
-    await api(acme, "POST", "/api/users", { name: "Acme Live", email: "acme.live@example.com", role: "member", teamId: null, active: true })
+    await api(acme, "POST", "/api/users", { name: "Acme Live", email: "acme.live@example.com", role: "member", teamId: null, active: true, startDate: null, tags: [] })
     const table = elements(await s.until((e) => elements(e, "users-table") !== ""), "users-table")
     await s.close()
     expect(rowNames(table)[0]).toBe("Acme Live")
@@ -261,7 +265,7 @@ describe("live updates", () => {
   it("the live record of a row doesn't follow another organization's changes", async () => {
     const s = await acme.stream("/teams/2/view", {})
     await s.until((e) => elements(e, "teams-record") !== "")
-    await api(globex, "PUT", `/api/teams/${GLOBEX_TEAM}`, { name: "Infra Again" })
+    await api(globex, "PUT", `/api/teams/${GLOBEX_TEAM}`, { name: "Infra Again", description: "" })
     expect(await s.collect(300)).toEqual([])
     await s.close()
   })
@@ -292,7 +296,7 @@ describe("bulk actions", () => {
   it("can't delete another organization's rows", async () => {
     const before = await globexUsers()
     expect(toasts((await bulkDelete(acme, GLOBEX_USERS)).events)).toEqual(["0 deleted, 2 no longer exist"])
-    const empty = await api(globex, "POST", "/api/teams", { name: "Globex Spare" })
+    const empty = await api(globex, "POST", "/api/teams", { name: "Globex Spare", description: "" })
     const teams = await acme.action("POST", "/teams/bulk/delete", { teams: { selection: [empty.body.id, GLOBEX_TEAM] } })
     expect(toasts(teams.events)).toEqual(["0 deleted, 2 no longer exist"])
     expect(await globexUsers()).toEqual(before)
@@ -339,7 +343,7 @@ describe("bulk actions", () => {
 
     // A bulk delete: Acme's view re-renders its table once.
     const created = await Promise.all(["Bulk A", "Bulk B"].map(async (name, i) =>
-      (await api(acme, "POST", "/api/users", { name, email: `bulk.${i}@example.com`, role: "member", teamId: null, active: true }))
+      (await api(acme, "POST", "/api/users", { name, email: `bulk.${i}@example.com`, role: "member", teamId: null, active: true, startDate: null, tags: [] }))
         .body.id as number
     ))
     await ours.until((e) => rowNames(elements(e, "users-table")).includes("Bulk B"), { settle: 300 })
@@ -352,5 +356,121 @@ describe("bulk actions", () => {
     // Globex's view was never woken: not by the bulk update, the inserts, or the bulk delete.
     expect(await theirs.collect(300)).toEqual([])
     await theirs.close()
+  })
+})
+
+describe("tags (many-to-many) within the organization", () => {
+  // Seeded: Acme's tags are 1-5 (Remote, On call, Mentor, New hire, Contractor), Globex's 6-8
+  // (Remote in another color, Night shift, Lead). Both have a "Remote".
+  const GLOBEX_TAG = 7
+  const GLOBEX_REMOTE = 6
+  const tagIds = (rows: ReadonlyArray<{ id: number }>) => rows.map((r) => r.id).sort((a, b) => a - b)
+  const userBody = (overrides: Record<string, unknown>) => ({
+    name: "Tag Mole",
+    email: "tag.mole@example.com",
+    role: "member",
+    teamId: null,
+    active: true,
+    startDate: null,
+    tags: [],
+    ...overrides
+  })
+
+  it("each organization lists and looks up only its own tags", async () => {
+    const [a, g] = await Promise.all([api(acme, "GET", "/api/tags?pageSize=50"), api(globex, "GET", "/api/tags?pageSize=50")])
+    expect(tagIds(a.body.rows)).toEqual([1, 2, 3, 4, 5])
+    expect(tagIds(g.body.rows)).toEqual([6, 7, 8])
+    expect((await api(acme, "GET", `/api/tags/${GLOBEX_TAG}`)).status).toBe(404)
+    expect((await acme.handler(new Request(`http://test/tags/${GLOBEX_TAG}`))).status).toBe(404)
+    const tagsPage = decode(await acme.page("/tags"))
+    expect(rowNames(tagsPage).sort()).toEqual(["Contractor", "Mentor", "New hire", "On call", "Remote"])
+  })
+
+  it("users' tags, chips, filter and form options never show another organization's tags, names or colors", async () => {
+    const page = decode(await acme.page("/users?pageSize=50"))
+    expect(page).toContain("Mentor")
+    expect(page).not.toContain("Night shift")
+    // Globex's "Remote" has its own color; Acme's chips and options only ever use Acme's.
+    expect(page).not.toContain("#0891b2")
+    expect(page).not.toContain("#be185d")
+    const rows = (await api(acme, "GET", "/api/users?pageSize=50")).body.rows as Array<{ tags: Array<number> }>
+    expect(rows.flatMap((r) => r.tags).every((t) => t >= 1 && t <= 5)).toBe(true)
+    const globexRows = (await api(globex, "GET", "/api/users?pageSize=50")).body.rows as Array<{ tags: Array<number> }>
+    expect(globexRows.flatMap((r) => r.tags).every((t) => t >= 6 && t <= 8)).toBe(true)
+    // Filtering by another organization's tag finds nothing (it isn't one of Acme's tags).
+    expect(total(await acme.page(`/users?tags=${GLOBEX_TAG}`))).toBe(0)
+    expect((await api(acme, "GET", `/api/users?tags=${GLOBEX_TAG}`)).body.total).toBe(0)
+  })
+
+  it("saving a user with another organization's tag is a field error (create and update), and changes nothing", async () => {
+    const created = await acme.action("POST", "/users", userDraft({ name: "Tag Mole", email: "tag.mole@example.com", tags: [String(GLOBEX_TAG)] }))
+    expect(signals(created.events)[0].users.errors.tags).toBe("That tag no longer exists")
+    expect(total(await acme.page("/users?name=Tag Mole"))).toBe(0)
+    // Mixed with one of its own: still rejected as a whole.
+    const mixed = await acme.action("POST", "/users", userDraft({ name: "Tag Mole", email: "tag.mole@example.com", tags: ["1", String(GLOBEX_REMOTE)] }))
+    expect(signals(mixed.events)[0].users.errors.tags).toBe("That tag no longer exists")
+    expect(total(await acme.page("/users?name=Tag Mole"))).toBe(0)
+
+    const before = (await api(acme, "GET", "/api/users/87")).body
+    const { events } = await acme.action("GET", "/users/87/edit")
+    const draft = (events[0] as { signals: { users: { draft: Record<string, unknown> } } }).signals.users.draft
+    const updated = await acme.action("PUT", "/users/87", userDraft({ ...draft, tags: ["1", String(GLOBEX_TAG)] }))
+    expect(signals(updated.events)[0].users.errors.tags).toBe("That tag no longer exists")
+    expect((await api(acme, "GET", "/api/users/87")).body).toEqual(before)
+    // Globex's tag is untouched: it has no Acme user.
+    expect((await api(globex, "GET", `/api/users?tags=${GLOBEX_TAG}&pageSize=50`)).body.rows
+      .every((r: { orgId: number }) => r.orgId === 2)).toBe(true)
+  })
+
+  it("the API answers 409 for another organization's tag ids (create and update)", async () => {
+    const conflict = {
+      status: 409,
+      body: { _tag: "Conflict", message: "That tag no longer exists", fields: { tags: "That tag no longer exists" } }
+    }
+    expect(await api(acme, "POST", "/api/users", userBody({ tags: [GLOBEX_TAG] }))).toEqual(conflict)
+    expect(await api(acme, "POST", "/api/users", userBody({ tags: [2, GLOBEX_REMOTE] }))).toEqual(conflict)
+    const before = (await api(acme, "GET", "/api/users/87")).body
+    const { id: _, orgId: __, createdAt: ___, ...body } = before
+    expect(await api(acme, "PUT", "/api/users/87", { ...body, tags: [GLOBEX_TAG] })).toEqual(conflict)
+    expect((await api(acme, "GET", "/api/users/87")).body).toEqual(before)
+    // Its own tags are fine.
+    expect((await api(acme, "PUT", "/api/users/87", { ...body, tags: [1, 2] })).body.tags).toEqual([1, 2])
+  })
+
+  it("another organization's tags can't be renamed or deleted", async () => {
+    const renamed = await acme.action("PUT", `/tags/${GLOBEX_TAG}`, { tags: { draft: { id: GLOBEX_TAG, name: "Hijacked", color: "#000000" } } })
+    expect(toasts(renamed.events)).toEqual(["That tag no longer exists"])
+    expect(toasts((await acme.action("DELETE", `/tags/${GLOBEX_TAG}`)).events)).toEqual(["That tag no longer exists"])
+    expect(toasts((await acme.action("POST", "/tags/bulk/delete", { tags: { selection: [GLOBEX_TAG] } })).events))
+      .toEqual(["0 deleted, 1 no longer exists"])
+    expect((await api(globex, "GET", `/api/tags/${GLOBEX_TAG}`)).body.name).toBe("Night shift")
+  })
+
+  it("another organization's tag changes don't wake the users or tags views; one's own still update them", async () => {
+    const users = await acme.stream("/users/view", usersQuery({ pageSize: 50 }))
+    const first = elements(await users.until((e) => elements(e, "users-table") !== ""), "users-table")
+    expect(decode(first)).toContain("Mentor")
+    const tagsQuery = { tags: { query: { page: 1, pageSize: 10, sort: "name", dir: "asc", filters: { name: "" } } } }
+    const tags = await acme.stream("/tags/view", tagsQuery)
+    await tags.until((e) => elements(e, "tags-table") !== "")
+
+    // Globex renames, recolors, creates and deletes its tags (one of them on its users).
+    const lead = (await api(globex, "GET", "/api/tags/8")).body
+    await api(globex, "PUT", "/api/tags/8", { name: "Team lead", color: "#ff0000" })
+    await api(globex, "PUT", `/api/tags/${GLOBEX_REMOTE}`, { name: "Remote", color: "#00ff00" })
+    const extra = await api(globex, "POST", "/api/tags", { name: "Globex extra", color: "#123456" })
+    await api(globex, "DELETE", `/api/tags/${extra.body.id}`)
+    await globex.action("POST", "/tags/bulk/delete", { tags: { selection: [8] } })
+    expect(await users.collect(300)).toEqual([])
+    expect(await tags.collect(100)).toEqual([])
+    expect(lead.name).toBe("Lead")
+
+    // Acme renames its own tag: its users view re-renders with the new name, its tags view too.
+    await api(acme, "PUT", "/api/tags/3", { name: "Mentor (senior)", color: "#16a34a" })
+    const table = elements(await users.until((e) => elements(e, "users-table") !== ""), "users-table")
+    expect(decode(table)).toContain("Mentor (senior)")
+    expect(decode(elements(await tags.until((e) => elements(e, "tags-table") !== ""), "tags-table"))).toContain("Mentor (senior)")
+    await users.close()
+    await tags.close()
   })
 })

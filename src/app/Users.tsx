@@ -11,14 +11,22 @@ export const Users = Resource.define({
   idColumn: "id",
   display: "name",
   query: {
-    sortable: ["name", "email", "role", "createdAt"],
-    filters: { name: "contains", email: "contains", role: "eq", teamId: "eq", active: "eq" },
+    sortable: ["name", "email", "role", "createdAt", "startDate"],
+    filters: {
+      name: "contains",
+      email: "contains",
+      role: "eq",
+      teamId: "eq",
+      active: "eq",
+      tags: "has",
+      createdAt: "range"
+    },
     defaultSort: ["createdAt", "desc"],
     pageSizes: [10, 25, 50]
   },
   messages: {
     unique: { email: "Email is already taken" },
-    invalidReference: { teamId: "That team no longer exists" }
+    invalidReference: { teamId: "That team no longer exists", tags: "That tag no longer exists" }
   },
   // Bulk actions on the selected rows: Delete, plus "Set role…" and "Set team…".
   bulk: { set: ["role", "teamId"] },

@@ -102,6 +102,46 @@ const migrations = Migrator.fromRecord({
       expiresAt TEXT NOT NULL
     )`
     yield* sql`CREATE INDEX sessions_accountId ON sessions(accountId)`
+  }),
+  /**
+   * Dates, long text and tags (after organizations, so tags are per
+   * organization from the start; a database from before it has none).
+   *
+   * - `users.startDate`: a calendar date, ISO `YYYY-MM-DD` text
+   *   (`Schemas.LocalDate`), so it sorts and compares as a date.
+   * - `teams.description`: long text (a textarea).
+   * - `tags`: per organization, like teams: names unique per organization, and
+   *   `(id, orgId)` unique so join rows can reference it.
+   * - `user_tags`: the many-to-many, with the organization in each row and
+   *   composite foreign keys to `users(id, orgId)` and `tags(id, orgId)`: a
+   *   user can only be linked to a tag of its own organization. Deleting a user
+   *   or a tag deletes its join rows (`ON DELETE CASCADE`).
+   */
+  "0005_dates_text_tags": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE users ADD COLUMN startDate TEXT`
+    yield* sql`ALTER TABLE teams ADD COLUMN description TEXT NOT NULL DEFAULT ''`
+    // The parent key of `user_tags`' composite foreign key (SQLite needs a unique index on it).
+    yield* sql`CREATE UNIQUE INDEX users_id_orgId ON users(id, orgId)`
+    yield* sql`CREATE TABLE tags (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      orgId INTEGER NOT NULL REFERENCES orgs(id) ON DELETE RESTRICT,
+      name TEXT NOT NULL,
+      color TEXT NOT NULL,
+      createdAt TEXT NOT NULL,
+      UNIQUE (orgId, name),
+      UNIQUE (id, orgId)
+    )`
+    yield* sql`CREATE INDEX tags_orgId ON tags(orgId)`
+    yield* sql`CREATE TABLE user_tags (
+      userId INTEGER NOT NULL,
+      tagId INTEGER NOT NULL,
+      orgId INTEGER NOT NULL,
+      PRIMARY KEY (userId, tagId),
+      FOREIGN KEY (userId, orgId) REFERENCES users(id, orgId) ON DELETE CASCADE,
+      FOREIGN KEY (tagId, orgId) REFERENCES tags(id, orgId) ON DELETE CASCADE
+    )`
+    yield* sql`CREATE INDEX user_tags_tagId ON user_tags(tagId)`
   })
 })
 
@@ -177,6 +217,46 @@ const seed = Effect.gen(function*() {
         createdAt: new Date(Date.UTC(2025, 5, 1)).toISOString()
       })), { concurrency: "unbounded" })
     yield* insertAll("accounts", rows)
+  }
+
+  // First run with tags: each organization's own (Acme five, Globex three; both have a
+  // "Remote", which per-organization uniqueness allows), some on most users, always of
+  // the user's organization. Start dates for two thirds of the users.
+  if ((yield* count("tags")) === 0) {
+    const tags = [
+      ["Remote", "#2563eb", "Acme"],
+      ["On call", "#dc2626", "Acme"],
+      ["Mentor", "#16a34a", "Acme"],
+      ["New hire", "#d97706", "Acme"],
+      ["Contractor", "#7c3aed", "Acme"],
+      ["Remote", "#0891b2", "Globex"],
+      ["Night shift", "#be185d", "Globex"],
+      ["Lead", "#4d7c0f", "Globex"]
+    ] as const
+    yield* insertAll(
+      "tags",
+      tags.map(([name, color, org], i) => ({
+        name,
+        color,
+        orgId: orgId(org),
+        createdAt: new Date(Date.UTC(2025, 8, 1 + i)).toISOString()
+      }))
+    )
+    const tagRows = yield* sql<{ id: number; orgId: number }>`SELECT id, orgId FROM tags ORDER BY id`
+    const users = yield* sql<{ id: number; orgId: number }>`SELECT id, orgId FROM users ORDER BY id`
+    yield* insertAll(
+      "user_tags",
+      users.flatMap((user) =>
+        tagRows.filter((t) => t.orgId === user.orgId)
+          .filter((_, k) => (user.id * (k + 3)) % 7 < 2)
+          .map((tag) => ({ userId: user.id, tagId: tag.id, orgId: user.orgId }))
+      )
+    )
+    yield* sql`UPDATE users SET startDate = date('2024-01-01', '+' || ((id * 37) % 900) || ' days')
+               WHERE startDate IS NULL AND id % 3 != 0`
+  }
+  if ((yield* sql<{ n: number }>`SELECT COUNT(*) AS n FROM teams WHERE description != ''`)[0]?.n === 0) {
+    yield* sql`UPDATE teams SET description = 'The ' || name || ' team.' WHERE id % 2 = 1`
   }
 })
 

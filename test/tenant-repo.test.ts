@@ -20,6 +20,7 @@ import { SqlClient } from "effect/sql"
 import { afterAll } from "vitest"
 import * as Db from "../src/app/Db.ts"
 import type { OrgId } from "../src/app/Org.ts"
+import type { TagId } from "../src/app/Tag.ts"
 import type { TeamId } from "../src/app/Team.ts"
 import { User } from "../src/app/User.ts"
 import { Users } from "../src/app/Users.tsx"
@@ -38,8 +39,12 @@ const scope = (isolateKeys: boolean): Scope.Scope<CurrentOrg> => ({
   isolateKeys
 })
 const teams: Scope.ReferenceTarget = { table: "teams", idColumn: "id", tenantColumn: "orgId" }
+const tags: Scope.ReferenceTarget = { table: "tags", idColumn: "id", tenantColumn: "orgId" }
 
-const makeRepo = (isolateKeys: boolean, references = [["teamId", teams] as const]) =>
+const makeRepo = (
+  isolateKeys: boolean,
+  references: ReadonlyArray<readonly [string, Scope.ReferenceTarget]> = [["teamId", teams]]
+) =>
   Repo.make(User, { table: "users", idColumn: "id", query: Users.query, scope: scope(isolateKeys), references })
 
 const newUser = (name: string, teamId: number | null = null) =>
@@ -49,7 +54,9 @@ const newUser = (name: string, teamId: number | null = null) =>
     role: "member",
     teamId: teamId as TeamId | null,
     active: true,
-    orgId: 1 as OrgId
+    orgId: 1 as OrgId,
+    startDate: null,
+    tags: []
   })
 
 /** Six views, as in `queries.test.ts`: three pages, sorted by name, filtered by role, filtered by team. */
@@ -70,7 +77,7 @@ afterAll(() => {
 
 /** Statements the views run (page queries, COUNTs, row re-fetches), not the mutations' own. */
 const viewStatements = () =>
-  sqlLog.statements.filter((s) => /SELECT \* FROM "users"[^]*LIMIT|COUNT\(\*\)|"id" IN/.test(s)).length
+  sqlLog.statements.filter((s) => /^\s*SELECT "users"\.\*[^]*LIMIT|COUNT\(\*\) AS total|FROM "users" WHERE \(?"id" IN/.test(s)).length
 
 const measure = (isolateKeys: boolean) =>
   Effect.gen(function*() {
@@ -79,7 +86,7 @@ const measure = (isolateKeys: boolean) =>
     for (const q of views) {
       yield* repo.live(q).pipe(
         Stream.runForEach((event) =>
-          Effect.sync(() => pages.push(event._tag === "Page" ? event.page.rows : event.rows))
+          Effect.sync(() => pages.push(event._tag === "Rows" ? event.rows : event.page.rows))
         ),
         acme,
         Effect.forkScoped
@@ -139,7 +146,16 @@ describe("references", () => {
     yield* sql`CREATE TABLE teams (id INTEGER PRIMARY KEY, orgId INTEGER NOT NULL, name TEXT NOT NULL, createdAt TEXT NOT NULL)`
     yield* sql`CREATE TABLE users (
       id INTEGER PRIMARY KEY AUTOINCREMENT, orgId INTEGER NOT NULL, name TEXT NOT NULL, email TEXT NOT NULL,
-      role TEXT NOT NULL, active INTEGER NOT NULL, createdAt TEXT NOT NULL, teamId INTEGER REFERENCES teams(id))`
+      role TEXT NOT NULL, active INTEGER NOT NULL, createdAt TEXT NOT NULL, startDate TEXT,
+      teamId INTEGER REFERENCES teams(id))`
+    // Tags with plain foreign keys too (the app's are composite, `(tagId, orgId)`).
+    yield* sql`CREATE TABLE tags (id INTEGER PRIMARY KEY, orgId INTEGER NOT NULL, name TEXT NOT NULL, color TEXT NOT NULL, createdAt TEXT NOT NULL)`
+    yield* sql`CREATE TABLE user_tags (
+      userId INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      tagId INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+      orgId INTEGER NOT NULL,
+      PRIMARY KEY (userId, tagId))`
+    yield* sql`INSERT INTO tags VALUES (1, 1, 'Acme Tag', '#111111', '2025-01-01'), (2, 2, 'Globex Tag', '#222222', '2025-01-01')`
     yield* sql`INSERT INTO teams VALUES (1, 1, 'Acme Team', '2025-01-01'), (2, 2, 'Globex Team', '2025-01-01')`
   })).pipe(Layer.provideMerge(SqliteClient.layer({ filename: ":memory:" })), Layer.merge(Reactivity.layer))
 
@@ -182,6 +198,31 @@ describe("references", () => {
       const moved = yield* acme(checked.updateMany([a.id, b.id], { teamId: 1 as TeamId }))
       expect(moved).toEqual({ done: [a.id, b.id], missing: [], restricted: [] })
     }).pipe(Effect.provide(plainDatabase)))
+
+  it.live("many-to-many ids are references too: another tenant's tag is rejected, on insert, update and in a mix", () =>
+    Effect.gen(function*() {
+      const unchecked = yield* makeRepo(true, [])
+      const checked = yield* makeRepo(true, [["teamId", teams], ["tags", tags]])
+      // Without the check, the plain foreign keys let a user link to the other tenant's tag.
+      const leaked = yield* acme(unchecked.insert({ ...newUser("Leaky Tags"), tags: [2 as TagId] }))
+      expect(leaked.tags).toEqual([2])
+
+      const rejected = yield* acme(Effect.flip(checked.insert({ ...newUser("Tag Rejected"), tags: [1 as TagId, 2 as TagId] })))
+      expect(rejected).toEqual(new Repo.InvalidReference({ column: "tags" }))
+      const own = yield* acme(checked.insert({ ...newUser("Own Tags"), tags: [1 as TagId] }))
+      expect(own).toMatchObject({ tags: [1], orgId: 1 })
+      const moved = yield* acme(Effect.flip(checked.update(User.update.make({ ...own, tags: [2 as TagId] }))))
+      expect(moved).toEqual(new Repo.InvalidReference({ column: "tags" }))
+      expect(yield* acme(checked.findById(own.id))).toMatchObject({ tags: [1] })
+      // Join rows carry the tenant (`through.tenant`), for the app's composite foreign keys.
+      const sql = yield* SqlClient.SqlClient
+      expect(yield* sql`SELECT userId, tagId, orgId FROM user_tags WHERE userId = ${own.id}`)
+        .toEqual([{ userId: own.id, tagId: 1, orgId: 1 }])
+      // A bulk delete takes the join rows with the users.
+      expect((yield* acme(checked.deleteMany([own.id, leaked.id]))).done).toHaveLength(2)
+      expect(yield* sql`SELECT * FROM user_tags`).toEqual([])
+    }).pipe(Effect.provide(plainDatabase)))
+
 })
 
 describe("bulk changes", () => {

@@ -13,5 +13,9 @@ export class Team extends Model.Class<Team>("Team")({
   ).annotate({ title: "Name" }),
   // The tenant: set by the server from the signed-in account, never shown or sent by forms.
   orgId: OrgId.annotate({ title: "Organization" }),
+  // Long text: a max length of 200 or more makes it a textarea (no widget annotation needed).
+  description: Schema.Trim.check(
+    Schema.isMaxLength(500, { message: "Keep it under 500 characters" })
+  ).annotate({ title: "Description" }),
   createdAt: Model.DateTimeInsert
 }) {}

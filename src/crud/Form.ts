@@ -26,8 +26,8 @@ export const noErrors = <K extends string>(keys: ReadonlyArray<K>): Errors<K> =>
   Object.fromEntries(keys.map((k) => [k, ""])) as Errors<K>
 
 /** A blank draft value per field kind (what an empty form binds to). */
-export const blank = (field: Field.FieldInfo): string | boolean =>
-  field.kind === "boolean" ? false : field.kind === "enum" ? (field.nullable ? "" : field.options[0] ?? "") : ""
+export const blank = (field: Field.FieldInfo): string | boolean | ReadonlyArray<string> =>
+  field.kind === "ids" ? [] : field.kind === "boolean" ? false : field.kind === "enum" ? (field.nullable ? "" : field.options[0] ?? "") : ""
 
 export const fields = <F extends Schema.Struct.Fields>(struct: { readonly fields: F }) =>
   Object.values(Field.infos(struct.fields)) as ReadonlyArray<Field.FieldInfo>
@@ -73,6 +73,11 @@ export const blankDraft = <F extends Schema.Struct.Fields>(struct: { readonly fi
 // ---------------------------------------------------------------------------
 
 const fromInput = (field: Field.FieldInfo, value: unknown): unknown => {
+  // A multi-select sends its ids as strings.
+  if (field.kind === "ids" && field.element !== undefined && Array.isArray(value)) {
+    const element = field.element
+    return value.map((v) => fromInput(element, v))
+  }
   if (typeof value !== "string") return value
   if (value === "" && field.nullable) return null
   if (field.kind === "number" && value.trim() !== "" && !Number.isNaN(Number(value))) return Number(value)
@@ -100,7 +105,11 @@ export const toDraft = <S extends Schema.Codec<any, any, never, never> & { reado
   const draft: Record<string, unknown> = { id }
   for (const f of fields(schema)) {
     const v = encoded[f.key]
-    draft[f.key] = v === null || v === undefined ? "" : f.widget === "select" && typeof v === "number" ? String(v) : v
+    draft[f.key] = v === null || v === undefined ? "" : f.widget === "select" && typeof v === "number"
+      ? String(v)
+      : f.kind === "ids" && Array.isArray(v)
+      ? v.map(String)
+      : v
   }
   return draft
 }

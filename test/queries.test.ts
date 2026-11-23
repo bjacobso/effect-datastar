@@ -60,7 +60,11 @@ describe("SQL statements per mutation", () => {
     await measure("change role (filtered col)", await save(87, { role: "admin" }))
     await measure("insert", () => app.action("POST", "/users", userDraft({ name: "New", email: "new@example.com" })))
     await measure("delete", () => app.action("DELETE", "/users/88"))
-    await measure("rename team", () => app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth Eng" } } }))
+    await measure("rename team", () => app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth Eng", description: "" } } }))
+    // Tags 1-3 and 5 are Acme's.
+    await measure("tag a visible user", await save(86, { tags: ["1", "2", "3"] }))
+    await measure("rename tag", () => app.action("PUT", "/tags/1", { tags: { draft: { id: 1, name: "Remote first", color: "#2563eb" } } }))
+    await measure("delete tag", () => app.action("DELETE", "/tags/5"))
     const bulk = (path: string, users: Record<string, unknown>) => () => app.action("POST", path, { users })
     // Users 86, 82 and 81 are Acme's, on page 1 of the default list, and none is in team 1
     // (Acme's; 84 and 83 are Globex's and not on Acme's pages at all).
@@ -70,36 +74,50 @@ describe("SQL statements per mutation", () => {
     await measure("bulk delete, 3 users", bulk("/users/bulk/delete", { selection: three }))
 
     await Promise.all(streams.map((s) => s.close()))
-    // Users and teams are tenant-scoped: reading the previous version is also the
-    // "is it in my organization" check, and a user's team is checked to be in the
-    // organization too (`SELECT 1 FROM teams`, when the draft has a team).
+    // Users, teams and tags are tenant-scoped: reading the previous version is also the "is it
+    // in my organization" check. A reference (team, tags) is checked to be in the organization
+    // when it changes (`SELECT COUNT(*) FROM teams|tags ... AND orgId = ?`); an unchanged one was
+    // checked when it was written. Users have tags (a join table), so a user update is a
+    // transaction: BEGIN and COMMIT around reading the previous version (its tags say which join
+    // rows to change) and the update; the join table is touched only if the tags changed. Rows
+    // are read with their tags in the same statement (a subquery), so reads cost what they did.
     expect(Object.fromEntries(results.map((r) => [r.mutation, r.statements]))).toEqual({
-      // read previous version + team check + update + row re-fetch (page 1) + name-sorted view re-query (2)
-      "rename visible user": 6,
-      // read previous version + team check + update; no view can show the row
-      "toggle active, off-page user": 3,
-      // read previous version + team check + update + row re-fetch (page 1)
-      "change email, visible user": 4,
-      // read previous version + team check + update + row re-fetch (page 1) + role-filtered view re-query (2)
-      "change role (filtered col)": 6,
-      // mutation (no team) + page query and COUNT per view
+      // BEGIN + previous version + update + COMMIT + row re-fetch (page 1) + name-sorted view re-query (2)
+      "rename visible user": 7,
+      // BEGIN + previous version + update + COMMIT; no view can show the row
+      "toggle active, off-page user": 4,
+      // BEGIN + previous version + update + COMMIT + row re-fetch (page 1)
+      "change email, visible user": 5,
+      // BEGIN + previous version + update + COMMIT + row re-fetch (page 1) + role-filtered view re-query (2)
+      "change role (filtered col)": 7,
+      // mutation (no team, no tags: no check, no transaction) + page query and COUNT per view
       "insert": 13,
       // tenant check + delete + page query and COUNT per view
       "delete": 14,
-      // read previous version + update + page query, COUNT and team lookup per view. No teams
-      // view is open here, but the previous version is read anyway: it is the tenant check,
-      // and views in other processes may need the changed columns (they travel with the broadcast).
-      "rename team": 20,
+      // previous version (the tenant check) + update + the team lookup per view. A renamed team
+      // can't change which users a page shows, so views re-render from the page they have
+      // (and send nothing if it doesn't show the team).
+      "rename team": 8,
+      // Tags changed on one row: a row patch, like any column. BEGIN + previous version + tag
+      // check + update + DELETE and INSERT of join rows + COMMIT + a re-fetch of the row in each
+      // of the three views whose page shows user 86. No page query, no COUNT.
+      "tag a visible user": 10,
+      // As a team rename: previous version + update + the tag lookup per view.
+      "rename tag": 8,
+      // Deleting a tag deletes its join rows (ON DELETE CASCADE), which may change any page:
+      // tenant check + delete + page query, COUNT and both lookups per view.
+      "delete tag": 26,
       // One transaction (BEGIN, read the rows in the organization, team check, one UPDATE,
       // COMMIT) and one invalidation for the three: the two views that show some of them
-      // (page 1 and one other) re-fetch those rows once each (2), the team-filtered view re-queries (2).
-      // The team check runs once: every row gets the same team.
+      // (page 1 and one other) re-fetch those rows once each (2), the team-filtered view
+      // re-queries (2). The team check runs once: every row gets the same team.
       "bulk set team, 3 users": 9,
-      // BEGIN, read, UPDATE, COMMIT (no team, no check); page 1 re-fetches its rows (1), the
-      // role-filtered view re-queries (2).
+      // BEGIN, read, UPDATE, COMMIT (no reference, no check); page 1 re-fetches its rows (1),
+      // the role-filtered view re-queries (2).
       "bulk set role, 3 users": 7,
-      // BEGIN, read the rows, a savepoint + DELETE + release per row, COMMIT (12); then one
-      // page query and COUNT per view (12). Three single deletes would be 3 × 13.
+      // BEGIN, read the rows, a savepoint + DELETE + release per row (their join rows go with
+      // them), COMMIT (12); then one page query and COUNT per view (12). Three single deletes
+      // would be 3 × 14.
       "bulk delete, 3 users": 24
     })
   })

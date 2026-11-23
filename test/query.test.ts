@@ -2,7 +2,9 @@ import { SqliteClient } from "@effect/sql-sqlite-node"
 import { describe, expect, it, layer } from "@effect/vitest"
 import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/sql"
+import { User } from "../src/app/User.ts"
 import { Users } from "../src/app/Users.tsx"
+import * as Query from "../src/crud/Query.ts"
 
 const UserQuery = Users.query
 
@@ -51,7 +53,7 @@ describe("Query schema", () => {
 layer(SqliteClient.layer({ filename: ":memory:" }))("Query SQL", (it) => {
   const compile = (q: ReturnType<typeof query>) =>
     Effect.map(Effect.service(SqlClient.SqlClient), (sql) => {
-      const [text, params] = sql`SELECT * FROM users ${UserQuery.where(sql, q)} ${UserQuery.orderBy(sql, q, "id")}`
+      const [text, params] = sql`SELECT * FROM users ${UserQuery.where(sql, q, "id")} ${UserQuery.orderBy(sql, q, "id")}`
         .compile()
       return { text: text.replace(/\s+/g, " ").trim(), params }
     })
@@ -117,4 +119,76 @@ describe("Query URL params", () => {
       expect(decode(query({}, { teamId }))._tag).toBe("Success")
     }
   })
+})
+
+describe("date ranges and many-to-many filters", () => {
+  it("a range filter is two keys, each an ISO date or blank", () => {
+    expect(Object.keys(UserQuery.initial.filters)).toEqual(
+      expect.arrayContaining(["createdAtFrom", "createdAtTo", "tags"])
+    )
+    expect(UserQuery.filters.find((f) => f.key === "createdAt")).toMatchObject({
+      operator: "range",
+      kind: "datetime",
+      params: ["createdAtFrom", "createdAtTo"]
+    })
+    expect(decode(query({}, { createdAtFrom: "2026-01-01", createdAtTo: "" }))._tag).toBe("Success")
+    for (const bad of ["2026-02-30", "2026-1-1", "yesterday", "2026-01-01T00:00"]) {
+      expect(decode(query({}, { createdAtFrom: bad }))._tag, bad).toBe("Failure")
+    }
+  })
+
+  it("a has filter takes one of the related ids", () => {
+    expect(UserQuery.filters.find((f) => f.key === "tags")).toMatchObject({ operator: "has", kind: "ids" })
+    expect(decode(query({}, { tags: "3" }))._tag).toBe("Success")
+    expect(decode(query({}, { tags: "x" }))._tag).toBe("Failure")
+    expect(decode(query({}, { tags: "1.5" }))._tag).toBe("Failure")
+  })
+
+  it("round-trips through the URL, dropping invalid dates", () => {
+    const q = query({}, { createdAtFrom: "2026-01-01", createdAtTo: "2026-01-31", tags: "2" })
+    const params = UserQuery.toSearchParams(q)
+    expect(params.toString()).toBe("tags=2&createdAtFrom=2026-01-01&createdAtTo=2026-01-31")
+    expect(UserQuery.fromSearchParams(params)).toEqual(q)
+    expect(UserQuery.fromSearchParams(new URLSearchParams("createdAtFrom=2026-13-01&createdAtTo=2026-02-01")))
+      .toEqual(query({}, { createdAtTo: "2026-02-01" }))
+  })
+
+  it("range and has filters count as query columns (they decide which rows match)", () => {
+    expect(UserQuery.columns(query({}, { createdAtTo: "2026-01-31", tags: "1" }))).toEqual(["createdAt", "tags", "createdAt"])
+  })
+
+  it("rejects a range on a non-date field, and has on a plain field", () => {
+    const config = { sortable: ["name"], defaultSort: ["name", "asc"], pageSizes: [10] } as const
+    expect(() => Query.make(User, { ...config, filters: { name: "range" } })).toThrow("is not a date")
+    expect(() => Query.make(User, { ...config, filters: { name: "has" } })).toThrow("is not many-to-many")
+    expect(() => Query.make(User, { ...config, filters: { tags: "eq" } })).toThrow("use has")
+  })
+})
+
+layer(SqliteClient.layer({ filename: ":memory:" }))("date range and has SQL", (it) => {
+  const compile = (q: ReturnType<typeof query>) =>
+    Effect.map(Effect.service(SqlClient.SqlClient), (sql) => {
+      const [text, params] = sql`SELECT * FROM users ${UserQuery.where(sql, q, "id")}`.compile()
+      return { text: text.replace(/\s+/g, " ").trim(), params }
+    })
+
+  it.effect("a datetime range compares ISO text; the `to` day is inclusive", () =>
+    Effect.gen(function*() {
+      const { text, params } = yield* compile(query({}, { createdAtFrom: "2026-01-01", createdAtTo: "2026-01-31" }))
+      expect(text).toBe(`SELECT * FROM users WHERE ("createdAt" >= ? AND "createdAt" < ?)`)
+      expect(params).toEqual(["2026-01-01", "2026-02-01"])
+    }))
+
+  it.effect("either end may be blank", () =>
+    Effect.gen(function*() {
+      expect((yield* compile(query({}, { createdAtTo: "2026-12-31" }))).params).toEqual(["2027-01-01"])
+      expect((yield* compile(query({}, { createdAtFrom: "2026-03-01" }))).text).toContain(`WHERE "createdAt" >= ?`)
+    }))
+
+  it.effect("has: rows whose join table holds the id", () =>
+    Effect.gen(function*() {
+      const { text, params } = yield* compile(query({}, { tags: "3" }))
+      expect(text).toBe(`SELECT * FROM users WHERE "id" IN (SELECT "userId" FROM "user_tags" WHERE "tagId" = ?)`)
+      expect(params).toEqual([3])
+    }))
 })

@@ -58,6 +58,9 @@ describe("sign in, organization isolation, sign out", () => {
     await expect.poll(() => total(page).innerText()).toBe("52 total")
     const filterTeams = await page.locator("#users-filter-teamId option").allInnerTexts()
     expect(filterTeams).toEqual(["All", "None", "Design", "Growth", "Platform"])
+    // Tags too: Acme's five, not Globex's (which has a "Remote" of its own).
+    const filterTags = await page.locator("#users-filter-tags option").allInnerTexts()
+    expect(filterTags).toEqual(["All", "Contractor", "Mentor", "New hire", "On call", "Remote"])
     await page.getByRole("button", { name: "New user" }).click()
     await dialog(page).locator(`[id$="-field-teamId"] [role=combobox]`).click()
     const formTeams = await page.getByRole("listbox").getByRole("option").allInnerTexts()
@@ -82,7 +85,7 @@ describe("sign in, organization isolation, sign out", () => {
     expect(await other.locator("#account-org").innerText()).toBe("Globex")
     await expect.poll(() => total(other).innerText()).toBe("35 total")
     await other.getByRole("button", { name: "New user" }).click()
-    await dialog(other).locator("input[type=text]").fill("Globex Secret")
+    await dialog(other).locator(`input[id$="-field-name"]`).fill("Globex Secret")
     await dialog(other).locator("input[type=email]").fill("secret@globex.test")
     await save(other)
     await expect.poll(() => total(other).innerText()).toBe("36 total")

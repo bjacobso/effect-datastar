@@ -13,7 +13,7 @@
  * property works before the island's code arrives; the island renders it once loaded.
  */
 import { syncTheme } from "../ui/theme/themes.ts"
-import { type Host, TAG } from "./host.ts"
+import { type Host, READY, TAG } from "./host.ts"
 import type { Island } from "./Island.tsx"
 import { loaders } from "./loaders.ts"
 import type { Mounted } from "./mount.tsx"
@@ -27,7 +27,7 @@ class IslandElement extends HTMLElement {
   #island: Island<never> | undefined
   #loading = false
   #observer: MutationObserver | undefined
-  #content: DocumentFragment | null = null
+  #content: Element | null = null
 
   /** Bound by Datastar's `data-bind`. Setting it from outside re-renders without events. */
   get value(): unknown {
@@ -70,11 +70,10 @@ class IslandElement extends HTMLElement {
       }
       this.#island = island
       // The server-rendered content (already bound by Datastar), handed over to the island.
-      const holder = this.querySelector(":scope > [data-island-content]")
-      if (holder && !this.#content) {
-        this.#content = document.createDocumentFragment()
-        this.#content.append(...holder.childNodes)
-      }
+      // It stays in its holder (in the document) until the island places it: taken out
+      // earlier, a live view's patch to an element inside (a form's select) would find no
+      // target while React renders.
+      this.#content ??= this.querySelector(":scope > [data-island-content]")
       this.#mounted = mount(target)
       this.#render()
     }, (error: unknown) => {
@@ -118,6 +117,10 @@ class IslandElement extends HTMLElement {
       return
     }
     this.#mounted.render(this.#island, props, this.#host())
+    // Rendered (the first time synchronously, see `mount`): the placeholder is now the live
+    // island. For styles and tests, since a click on the server's placeholder does nothing.
+    // Set again if a morph took it off (the server's host doesn't have it).
+    if (!this.hasAttribute(READY)) this.setAttribute(READY, "")
   }
 }
 

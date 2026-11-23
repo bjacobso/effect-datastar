@@ -163,7 +163,7 @@ describe("users live view, per change", () => {
   it("re-renders users streams when a related team is renamed", async () => {
     const s = await open(usersQuery())
     expect(s.first).toContain("Design")
-    await app.action("PUT", "/teams/3", { teams: { draft: { id: 3, name: "Design Ops" } } })
+    await app.action("PUT", "/teams/3", { teams: { draft: { id: 3, name: "Design Ops", description: "" } } })
     const events = await s.until(isTable)
     await s.close()
     expect(tablePatch(events)!.elements).toContain("Design Ops")

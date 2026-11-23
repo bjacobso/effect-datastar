@@ -74,7 +74,7 @@ describe("bulk delete", () => {
       const response = await app.handler(new Request("http://test/api/users", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name, email: `del${i}@example.com`, role: "member", teamId: null, active: true })
+        body: JSON.stringify({ name, email: `del${i}@example.com`, role: "member", teamId: null, active: true, startDate: null, tags: [] })
       }))
       return ((await response.json()) as { id: number }).id
     }))
@@ -89,7 +89,7 @@ describe("bulk delete", () => {
       const response = await app.handler(new Request("http://test/api/teams", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name })
+        body: JSON.stringify({ name, description: "" })
       }))
       return ((await response.json()) as { id: number }).id
     }))

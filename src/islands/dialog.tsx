@@ -19,16 +19,18 @@ export interface DialogProps {
  */
 export const Dialog = Island.make<DialogProps>("dialog", ({ props, host }) => (
   <Modal open={host.attr("open") !== null} labelledBy={props.labelledBy} onClose={() => host.emit("close")} keepMounted>
-    <Content fragment={host.content} />
+    <Content holder={host.content} />
   </Modal>
 ))
 
-function Content({ fragment }: { readonly fragment: DocumentFragment | null }) {
+function Content({ holder }: { readonly holder: Element | null }) {
   const ref = useRef<HTMLDivElement>(null)
   useLayoutEffect(() => {
-    // Moves the nodes in once; React never renders children here, so it leaves them alone.
-    if (fragment && ref.current) ref.current.append(fragment)
-  }, [fragment])
+    // Moves the nodes in once, straight from the holder (they never leave the document),
+    // as soon as there is somewhere to put them; React never renders children here, so it
+    // leaves them alone.
+    if (holder?.firstChild && ref.current) ref.current.append(...holder.childNodes)
+  })
   return <div ref={ref} {...stylex.props(styles.contents)} />
 }
 

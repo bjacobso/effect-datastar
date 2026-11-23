@@ -9,6 +9,7 @@ import { HttpRouter, HttpServer } from "effect/http"
 import { Reactivity } from "effect/reactivity"
 import { describe, expect, expectTypeOf, it } from "vitest"
 import { Resources } from "../src/app/Resources.ts"
+import { Tags } from "../src/app/Tags.tsx"
 import { Teams } from "../src/app/Teams.tsx"
 import { Users } from "../src/app/Users.tsx"
 import * as Db from "../src/app/Db.ts"
@@ -39,7 +40,7 @@ describe("Resource types", () => {
     serve(signedIn, Users.layer.pipe(Layer.provideMerge(Reactivity.layer), Layer.provide(infra)))
     expectTypeOf(Resources.layer).toEqualTypeOf<
       Layer.Layer<
-        Resource.ServicesOf<"users" | "teams">,
+        Resource.ServicesOf<"users" | "teams" | "tags">,
         never,
         import("effect/sql").SqlClient.SqlClient | Reactivity.Reactivity
       >
@@ -109,6 +110,19 @@ describe("Resource types", () => {
     Teams.with({ sections: [Users.embed({ name: "x", title: "X", lock: "role" })] })
     // @ts-expect-error: a user's page can't lock users by team to the user's id
     Users.with({ sections: [Users.embed({ name: "x", title: "X", lock: "teamId" })] })
+  })
+
+  it("many-to-many: the target must be in the app, and the field must hold its ids", () => {
+    const ok = () => Resource.app(Users.with({ relations: { teamId: Teams }, manyToMany: { tags: Tags } }), Teams, Tags)
+    // @ts-expect-error: users' `tags` needs tags in the app
+    const noTags = () => Resource.app(Users.with({ relations: { teamId: Teams }, manyToMany: { tags: Tags } }), Teams)
+    // @ts-expect-error: `tags` holds tag ids, not team ids
+    Users.with({ manyToMany: { tags: Teams } })
+    // @ts-expect-error: `teamId` is not many-to-many (not an array)
+    Users.with({ manyToMany: { teamId: Teams } })
+    // @ts-expect-error: and `tags` is not a plain relation
+    Users.with({ relations: { tags: Tags } })
+    expect([ok, noTags]).toHaveLength(2)
   })
 
   it("a relation's field holds the target's ids", () => {

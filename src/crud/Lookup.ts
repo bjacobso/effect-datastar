@@ -18,6 +18,8 @@ export interface Option {
   readonly label: string
   /** Link to the referenced row's page, when it has one. */
   readonly href?: string | undefined
+  /** The row's color (`#rrggbb`), when the table has a color field: tag chips. */
+  readonly color?: string | undefined
 }
 
 /** `R`: what the scope needs (the tenant service), `never` if unscoped. */
@@ -34,6 +36,8 @@ export const make = <R = never>(config: {
   readonly label: string
   readonly href?: ((value: string) => string) | undefined
   readonly scope?: Scope.Scope<R> | undefined
+  /** A color column, read along with the label. */
+  readonly color?: string | undefined
 }) =>
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
@@ -41,16 +45,22 @@ export const make = <R = never>(config: {
     const current: Effect.Effect<Scope.Current | undefined, never, R> = scope === undefined
       ? Effect.succeed(undefined)
       : scope.value
+    const color = config.color === undefined ? sql.literal("") : sql`, ${sql(config.color)} AS color`
     const options = Effect.flatMap(current, (v) =>
-      sql<{ value: string | number; label: string }>`
-        SELECT ${sql(config.value)} AS value, ${sql(config.label)} AS label
+      sql<{ value: string | number; label: string; color?: string }>`
+        SELECT ${sql(config.value)} AS value, ${sql(config.label)} AS label ${color}
         FROM ${sql(config.table)}
         ${v === undefined || scope === undefined ? sql.literal("") : sql`WHERE ${sql(scope.column)} = ${v.encoded}`}
         ORDER BY ${sql(config.label)}`.pipe(
         Effect.map((rows) =>
           rows.map((r): Option => {
             const value = String(r.value)
-            return config.href ? { value, label: r.label, href: config.href(value) } : { value, label: r.label }
+            return {
+              value,
+              label: r.label,
+              ...(config.href ? { href: config.href(value) } : {}),
+              ...(typeof r.color === "string" ? { color: r.color } : {})
+            }
           })
         )
       ))

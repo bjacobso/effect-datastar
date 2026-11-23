@@ -70,7 +70,7 @@ export const makeApp = (options?: {
   return { ...as(), as, anonymous: client(anonymous, (request) => Promise.resolve(request)) }
 }
 
-/** The demo accounts (seeded): Acme has teams 1-3 and 52 users, Globex teams 4-5 and 35 users. */
+/** The demo accounts (seeded): Acme has teams 1-3, tags 1-5 and 52 users; Globex teams 4-5, tags 6-8 and 35 users. */
 export const ACME = "ada@acme.test"
 export const ACME_2 = "grace@acme.test"
 export const GLOBEX = "linus@globex.test"
@@ -136,15 +136,17 @@ const client = (raw: Handler, prepare: (request: Request) => Promise<Request>) =
     const decoder = new TextDecoder()
     let buffer = ""
     let pending: Promise<ReadableStreamReadResult<Uint8Array>> | undefined
-    const read = (ms: number) => {
+    // A read that times out stays pending for the next call, which gets its chunk: it is
+    // only cleared once a caller has received it (clearing it when it resolves would drop
+    // a chunk that arrives between two calls).
+    const read = async (ms: number) => {
       pending ??= reader.read()
-      return Promise.race([
-        pending.then((r) => {
-          pending = undefined
-          return r
-        }),
+      const r = await Promise.race([
+        pending,
         new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), ms))
       ])
+      if (r !== "timeout") pending = undefined
+      return r
     }
     const drain = (): Array<Event> => {
       const end = buffer.lastIndexOf("\n\n") + 2
@@ -208,14 +210,14 @@ export const usersQuery = (overrides: Record<string, unknown> = {}, filters: Rec
       pageSize: 10,
       sort: "createdAt",
       dir: "desc",
-      filters: { name: "", email: "", role: "", teamId: "", active: "", ...filters },
+      filters: { name: "", email: "", role: "", teamId: "", active: "", tags: "", createdAtFrom: "", createdAtTo: "", ...filters },
       ...overrides
     }
   }
 })
 
 export const userDraft = (draft: Record<string, unknown>) => ({
-  users: { draft: { id: "", name: "", email: "", role: "member", teamId: "", active: true, ...draft } }
+  users: { draft: { id: "", name: "", email: "", role: "member", teamId: "", active: true, startDate: "", tags: [], ...draft } }
 })
 
 /**
@@ -226,7 +228,7 @@ export const userDraft = (draft: Record<string, unknown>) => ({
 export const rowNames = (html: string) =>
   [
     ...html.matchAll(
-      /<tr id="(?:users|teams|members)-\d+"[^>]*>(?:<td[^>]*><input(?:[^>"]|"[^"]*")*\/?><\/td>)?<td[^>]*>(?:<span[^>]*>|<a [^>]*>)?([^<]*)/g
+      /<tr id="(?:users|teams|tags|members)-\d+"[^>]*>(?:<td[^>]*><input(?:[^>"]|"[^"]*")*\/?><\/td>)?<td[^>]*>(?:<span[^>]*>|<a [^>]*>)?([^<]*)/g
     )
   ].map((m) => m[1])
 

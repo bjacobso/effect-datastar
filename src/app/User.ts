@@ -1,6 +1,9 @@
 import { Schema } from "effect"
 import { Model } from "effect/schema"
+import * as ManyToMany from "../crud/ManyToMany.ts"
+import { LocalDate } from "../crud/Schemas.ts"
 import { OrgId } from "./Org.ts"
+import { TagId } from "./Tag.ts"
 import { TeamId } from "./Team.ts"
 
 export const UserId = Schema.Int.pipe(Schema.brand("UserId"))
@@ -19,7 +22,7 @@ const Email = Schema.Trim.check(
 
 /**
  * The single source of truth. Everything else (DB variants, JSON create/update
- * payloads, form fields, filters, sorting) is derived from this.
+ * payloads, form fields and widgets, filters, sorting) is derived from this.
  */
 export class User extends Model.Class<User>("User")({
   // DB-generated, but needed in `update` (it is the WHERE key) and read variants.
@@ -32,5 +35,10 @@ export class User extends Model.Class<User>("User")({
   active: Model.BooleanSqlite,
   // The tenant: set by the server from the signed-in account, never shown or sent by forms.
   orgId: OrgId.annotate({ title: "Organization" }),
-  createdAt: Model.DateTimeInsert
+  createdAt: Model.DateTimeInsert,
+  // A date without a time: a date picker in the form, ISO `YYYY-MM-DD` text in SQLite and JSON.
+  startDate: Schema.NullOr(LocalDate).annotate({ title: "Start date" }),
+  // Many-to-many: tag ids, stored in `user_tags` (with the organization, which its foreign keys check).
+  // A multi-select in the form; chips in the table.
+  tags: ManyToMany.Ids(TagId, { table: "user_tags", from: "userId", to: "tagId", tenant: "orgId" }).annotate({ title: "Tags" })
 }) {}

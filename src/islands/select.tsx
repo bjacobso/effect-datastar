@@ -1,5 +1,6 @@
 /**
- * Select island: a ui-sdk Select bound to a string signal ("" = nothing chosen).
+ * Select: a ui-sdk Select bound to a string signal ("" = nothing chosen). Relation and
+ * enum fields of the CRUD form.
  */
 import type { Option } from "../ui/form.tsx"
 import { SelectField } from "../ui/form-pickers.tsx"

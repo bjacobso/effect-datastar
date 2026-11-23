@@ -6,6 +6,9 @@
 
 export const TAG = "ds-island"
 
+/** Set on the host once the island has rendered in the browser (until then it is the server's placeholder). */
+export const READY = "data-island-ready"
+
 /** What an island component sees of its host element. */
 export interface Host {
   /** The value Datastar binds with `data-bind` on the host. */
@@ -16,6 +19,10 @@ export interface Host {
   readonly attr: (name: string) => string | null
   /** Dispatches an event on the host, for `data-on:*`. */
   readonly emit: (type: string) => void
-  /** The host's server-rendered content (`Island.Mount`'s `content`), moved out of its hidden holder on mount. */
-  readonly content: DocumentFragment | null
+  /**
+   * The hidden holder of the host's server-rendered content (`Island.Mount`'s `content`).
+   * The island moves its children to where it renders them, in a layout effect: until
+   * then they stay in the holder, in the document, so Datastar patches always find them.
+   */
+  readonly content: Element | null
 }

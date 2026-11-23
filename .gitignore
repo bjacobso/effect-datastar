@@ -4,3 +4,5 @@ node_modules
 # Build output: the server bundle, and the client bundle + CSS served from public/
 dist
 public/build
+# Browser test screenshots
+test/e2e/screenshots

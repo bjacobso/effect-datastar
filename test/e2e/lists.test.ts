@@ -96,7 +96,7 @@ describe("bulk actions", () => {
     const page = await open("/users?sort=name&dir=asc")
     for (const name of ["Bulk One", "Bulk Two", "Bulk Three"]) {
       await page.getByRole("button", { name: "New user" }).click()
-      await dialog(page).locator("input[type=text]").fill(name)
+      await dialog(page).locator(`input[id$="-field-name"]`).fill(name)
       await dialog(page).locator("input[type=email]").fill(`${name.replace(" ", ".").toLowerCase()}@example.com`)
       await save(page)
     }

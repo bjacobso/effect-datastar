@@ -1,6 +1,6 @@
 # effect-datastar
 
-An exploration of a fully Effect-native [Datastar](https://data-star.dev) app: schema-driven CRUD resources (users and teams, related by a foreign key) with pagination, sorting, filtering, create, update and delete, live updates across tabs, and the list state kept in the URL. Accounts sign in, and every team and user belongs to an organization that only its members can see. The server side is end-to-end [Effect](https://effect.website) 4.
+An exploration of a fully Effect-native [Datastar](https://data-star.dev) app: schema-driven CRUD resources (users, teams and tags, related by a foreign key and a many-to-many join table) with pagination, sorting, filtering, create, update and delete, bulk actions, live updates across tabs, and the list state kept in the URL. Form widgets (dates, a textarea, a switch, selects, a tag multi-select) are derived from the schemas. Accounts sign in, and every team, tag and user belongs to an organization that only its members can see. The server side is end-to-end [Effect](https://effect.website) 4.
 
 ```sh
 npm install
@@ -16,9 +16,9 @@ Demo accounts (seeded), all with the password `demo-password`:
 
 | Email               | Organization | Sees                                                |
 | ------------------- | ------------ | --------------------------------------------------- |
-| `ada@acme.test`     | Acme         | teams Platform, Growth, Design; 52 users            |
+| `ada@acme.test`     | Acme         | teams Platform, Growth, Design; 52 users; tags Remote, On call, Mentor, New hire, Contractor |
 | `grace@acme.test`   | Acme         | the same                                            |
-| `linus@globex.test` | Globex       | teams Infrastructure, Support; 35 users             |
+| `linus@globex.test` | Globex       | teams Infrastructure, Support; 35 users; tags Remote, Night shift, Lead |
 
 ## Resources
 
@@ -35,29 +35,38 @@ export const Users = Resource.define({
   idColumn: "id",
   display: "name",
   query: {
-    sortable: ["name", "email", "role", "createdAt"],
-    filters: { name: "contains", email: "contains", role: "eq", teamId: "eq", active: "eq" },
+    sortable: ["name", "email", "role", "createdAt", "startDate"],
+    filters: {
+      name: "contains", email: "contains", role: "eq", teamId: "eq", active: "eq",
+      tags: "has",          // many-to-many: users with this tag
+      createdAt: "range"    // two filters, createdAtFrom and createdAtTo
+    },
     defaultSort: ["createdAt", "desc"],
     pageSizes: [10, 25, 50]
   },
   messages: {
     unique: { email: "Email is already taken" },
-    invalidReference: { teamId: "That team no longer exists" }
+    invalidReference: { teamId: "That team no longer exists", tags: "That tag no longer exists" }
   },
   bulk: { set: ["role", "teamId"] },  // bulk actions: Delete, "Set role…", "Set team…"
+  tenant: { column: "orgId", service: CurrentOrg },  // per organization (see "Tenant-scoped resources")
   layout: Layout
 })
 ```
 
 Then the **app**, where relations and detail-page sections are attached once
-every definition is in scope, so users can point at teams while a team's page
-embeds its users:
+every definition is in scope, so users can point at teams and tags while a
+team's page embeds its users:
 
 ```ts
 // src/app/Resources.ts
 export const Resources = Resource.app(
-  Users.with({ relations: { teamId: Teams } }),
-  Teams.with({ sections: [Users.embed({ name: "members", title: "Members", lock: "teamId" })] })
+  Users.with({
+    relations: { teamId: Teams },   // a foreign key column
+    manyToMany: { tags: Tags }      // a join table (see "Fields" below)
+  }),
+  Teams.with({ sections: [Users.embed({ name: "members", title: "Members", lock: "teamId" })] }),
+  Tags
 )
 // App: Resources.routes (every route), Resources.layer (every Repo and Lookup),
 //      Resources.resources.users (endpoints, messages, Page, ...)
@@ -92,7 +101,83 @@ The types catch wiring mistakes (`test/types.test.ts`):
   the missing resources), and routes served without a resource's layer;
 - an embed locking a filter that isn't `eq`, or whose values aren't the parent's
   ids (`lock: "role"` on a team's page);
-- a relation whose field doesn't hold the target's ids (`role: Teams`).
+- a relation whose field doesn't hold the target's ids (`role: Teams`);
+- a many-to-many target missing from the app (`Resource.app(Users.with({ manyToMany: { tags: Tags } }), Teams)`),
+  a many-to-many field whose elements aren't the target's ids (`tags: Teams`), or
+  that isn't an array (`manyToMany: { teamId: Teams }`).
+
+## Fields
+
+Every widget, filter and SQL encoding follows from the model's schemas, not from
+per-field config (`src/crud/Field.ts`, `src/crud/Schemas.ts`):
+
+| Schema                                   | Kind       | Form widget                                    | Table                  |
+| ---------------------------------------- | ---------- | ---------------------------------------------- | ---------------------- |
+| `Schema.String`                          | `string`   | text input (`widget: "email"` for an email)    | text                   |
+| a string with `isMaxLength(200)` or more | `string`   | ui-sdk Textarea (server-rendered)              | text                   |
+| `Schema.Literals([...])`                 | `enum`     | ui-sdk Select island                           | badge                  |
+| a foreign key (`relations`)              | `number`   | ui-sdk Select island, options from the target  | linked label           |
+| `Schema.Boolean` / `Model.BooleanSqlite` | `boolean`  | switch (native checkbox, `role="switch"`)      | Yes / No badge         |
+| `Schemas.LocalDate` (`format: "date"`)   | `date`     | ui-sdk DatePicker island                       | date                   |
+| `DateTime.Utc` (`Model.DateTimeInsert`)  | `datetime` | read-only                                      | date and time          |
+| `Schemas.Color`                          | `string`   | color input                                    | swatch                 |
+| `ManyToMany.Ids(TagId, through)`         | `ids`      | ui-sdk Combobox (multiple) island, with chips  | chips in the tag color |
+
+A `widget` annotation still overrides the derived one.
+
+- **Dates.** `LocalDate` is a calendar date with no time or zone: an ISO
+  `YYYY-MM-DD` string, stored as that text in SQLite and sent as it in JSON
+  (`format: date` in the OpenAPI document). `DateTime.Utc` columns are ISO text
+  too, so a `range` filter compares text: `createdAtFrom=2026-01-01&createdAtTo=2026-01-31`
+  is `createdAt >= '2026-01-01' AND createdAt < '2026-02-01'` (on a date column,
+  `<= to`). In the filter bar a range is two date pickers; both keys round-trip
+  through the URL and are validated like any filter.
+- **Switch, not a ui-sdk Switch island.** `data-bind` already maps a checkbox to
+  a boolean signal, so a native `<input type="checkbox" role="switch">` styled as
+  the ui-sdk Switch (`styles.switch` in `src/ui/form.tsx`) needs no island, no
+  chunk and no host round trip, and works before any island code has loaded.
+- **Textarea.** The ui-sdk Textarea renders a plain `<textarea>` on the server,
+  which Datastar binds; it grows with its text through CSS `field-sizing: content`.
+
+### Many-to-many
+
+Storage is part of the model, the target is attached in the app, as for a
+foreign key:
+
+```ts
+// src/app/User.ts: a field holding tag ids, stored in user_tags(userId, tagId, orgId)
+tags: ManyToMany.Ids(TagId, { table: "user_tags", from: "userId", to: "tagId", tenant: "orgId" })
+
+// src/app/Resources.ts: what the ids point at
+Users.with({ manyToMany: { tags: Tags } })
+```
+
+The field is a plain `ReadonlyArray<TagId>` in every variant of the model, so
+rows, form drafts and the JSON API (read and write) all carry it as an array of
+ids. The `through` annotation tells the rest:
+
+- `Repo` reads it with each row (a correlated `json_group_array` subquery in the
+  same statement: no extra query per page or row), and writes the row and its join
+  rows in one transaction, touching only the join rows that changed. The ids are
+  references like a foreign key: with a tenant, each must be one of the current
+  organization's tags (one `SELECT COUNT(*) … WHERE id IN (…) AND orgId = ?`),
+  or the save fails as a whole with `InvalidReference` ("That tag no longer
+  exists" as a field error, 409 in the API).
+- With a tenant, `through.tenant` names the join table's tenant column: every
+  join row gets the current organization, and the table's composite foreign keys,
+  `(userId, orgId) → users(id, orgId)` and `(tagId, orgId) → tags(id, orgId)`,
+  let the database reject a link across organizations too.
+- A change to a user's tags is reported as a change to that user's `tags`
+  column: a row patch, unless the view filters on tags.
+- The join table references both sides with `ON DELETE CASCADE` (migration
+  `0005`), so deleting a tag or a user removes its join rows, bulk deletes included.
+- A many-to-many field can't be set in bulk: "Set <field>…" is one value, and
+  `Repo.updateMany` writes columns only (see "Bulk actions").
+- The target gives the options (the filter select and the dialog's multi-select),
+  the chips (label, link, and the color of its `Schemas.Color` field) and live
+  updates: renaming or recoloring a tag re-renders the users views that show it.
+  The target's lookup is tenant-scoped like any other, so a page only ever has
+  its own organization's tag names and colors; a row carries ids only.
 
 ## Detail pages and embedded "has many" tables
 
@@ -164,7 +249,7 @@ const Protected = Layer.mergeAll(HttpRouter.add("GET", "/", redirect("/users")),
 export const Routes = Layer.mergeAll(Protected, LoginRoutes, ApiRoutes, HttpStaticServer.layer({ root: "public" }))
 
 // src/app/Api.ts
-class AppApi extends HttpApi.make("effect-datastar").add(UsersApi.group).add(TeamsApi.group)
+class AppApi extends HttpApi.make("effect-datastar").add(UsersApi.group).add(TeamsApi.group).add(TagsApi.group)
   .middleware(Authentication).prefix("/api") {}
 ```
 
@@ -212,21 +297,24 @@ It is the embed lock generalized: the value comes from a service instead of
 resource (`src/crud/Scope.ts`). The `Repo` and `Lookup` read `CurrentOrg` on
 each call, so it is in their types and in the routes' requirements:
 
-- `list`, `live`, the COUNT, `findById` and the lookup's options (the team
-  select, filter and labels) add `orgId = :current`.
+- `list`, `live`, the COUNT, `findById` and the lookup's options (the team and
+  tag selects, filters, labels and chips) add `orgId = :current`.
 - `insert` and `update` set `orgId` to the current organization, whatever was sent.
 - `update` and `delete` of another organization's row fail with
   `NoSuchElementError`: "no longer exists" in the UI, 404 in the API. So do the
   detail page (404) and the live record.
-- A relation to a tenant-scoped resource (a user's `teamId`) must point at a row
-  of the same organization: `Repo` checks it before writing and fails with
-  `InvalidReference` (the field error "That team no longer exists", or a 409).
-  The foreign key alone can't tell: team 4 exists, just not in Acme. The
-  database also has a composite key, `(teamId, orgId) REFERENCES teams(id, orgId)`.
+- A relation to a tenant-scoped resource (a user's `teamId`, and each of its
+  `tags`) must point at a row of the same organization: `Repo` checks it before
+  writing and fails with `InvalidReference` (the field error "That team no longer
+  exists", or a 409). The foreign key alone can't tell: team 4 exists, just not
+  in Acme. A reference an update leaves unchanged isn't checked again (it was
+  checked when written, and rows never change organization). The database also
+  has composite keys, `(teamId, orgId) REFERENCES teams(id, orgId)` and the join
+  table's (see "Many-to-many").
 - The column is hidden from forms, filters, columns and the detail page, like
   an embed's lock, and left out of the API's request bodies.
-- Emails and team names are unique per organization, so "already taken" says
-  nothing about another organization's data.
+- Emails, team names and tag names are unique per organization, so "already
+  taken" says nothing about another organization's data (both have a "Remote" tag).
 
 It composes with an embed lock: the members table on `/teams/2` is
 `teamId = 2 AND orgId = :current`. On Acme's session, `?embed=members&scope=4`
@@ -239,6 +327,16 @@ same rules as single rows: only the current organization's rows are touched
 form (`InvalidReference`), the tenant column is never set, and the one
 invalidation is on the organization's key.
 
+**Migrations** (`src/app/Db.ts`) run in order on a fresh database and on one
+from an earlier version: `0001_users`, `0002_teams`, `0003_orgs` (organizations;
+teams and users rebuilt with `orgId`, per-organization uniqueness and the
+`(teamId, orgId)` key; existing rows go to Acme), `0004_auth` (accounts and
+sessions), `0005_dates_text_tags` (`users.startDate`, `teams.description`,
+per-organization `tags` and `user_tags` with composite keys). Tags come after
+organizations, so they are per organization from their first migration. The
+seed fills what is empty: Globex is added to a database that only had Acme,
+and tags (each organization's own) to one that had none.
+
 The types check that `column` is a column whose values are the service's `id`s
 (`service: CurrentUser`, whose `id` is an account id, is an error), and that the
 routes can't be served without something providing `CurrentOrg`
@@ -250,7 +348,10 @@ Change payloads carry ids, never rows, and a woken stream only re-queries its
 own organization. By default the reactivity keys are also per organization:
 a change is announced on `users[orgId=1]` (plus the record key), and views
 listen on that key and the bare `users` (for invalidations from outside the
-repo), so Globex's changes don't wake Acme's views at all. With
+repo), so Globex's changes don't wake Acme's views at all. The same goes for
+related tables: an Acme users view depends on `teams[orgId=1]` and
+`tags[orgId=1]`, so a Globex tag rename, recolor or delete never reaches it,
+while an Acme one re-renders the views that show the tag. With
 `isolateKeys: false` they share `users`. `test/tenant-repo.test.ts` counts the
 statements six open Acme views run when Globex mutates its own rows:
 
@@ -264,8 +365,10 @@ statements six open Acme views run when Globex mutates its own rows:
 
 The security tests are `test/auth.test.ts` (redirects, 401s, the cookie, sign
 out), `test/tenant.test.ts` (every cross-organization path: lists, lookups,
-guessed ids, references, embeds, the API, live streams, bulk actions) and
-`test/e2e/auth.test.ts` (sign in as Acme, see nothing of Globex, sign out).
+guessed ids, references, embeds, the API, live streams, bulk actions, tags),
+`test/tenant-repo.test.ts` (the repo's own checks, with plain foreign keys that
+can't catch a cross-organization team or tag) and `test/e2e/auth.test.ts` (sign
+in as Acme, see nothing of Globex, sign out).
 
 ## Layout
 
@@ -279,8 +382,9 @@ guessed ids, references, embeds, the API, live streams, bulk actions) and
   - `Resource.tsx`: composes everything below into resources (`define`, then `app`)
   - `Query.ts`: query signals schema, SQL `WHERE` / `ORDER BY`, URL params
   - `Repo.ts`: `SqlModel.makeRepository` plus paginated `list`, a `live` stream with row-level updates, and transactional `updateMany` / `deleteMany`
+  - `ManyToMany.ts`: many-to-many fields (`Ids`), their SQL reads, writes and `has` filter
   - `Lookup.ts`: options from another table, for foreign-key selects, filters and labels
-  - `Field.ts`, `Form.ts`: field metadata, form drafts (with input coercion) and per-field errors
+  - `Field.ts`, `Form.ts`, `Schemas.ts`: field metadata and widgets derived from schemas (`LocalDate`, `Color`), form drafts (with input coercion) and per-field errors
   - `components.tsx`: generic filter bar, sortable table, pagination, form fields and dialog (React + StyleX)
   - `Bulk.tsx`: selection checkboxes, the bulk bar and its toasts
   - `UrlState.ts`: the query in the address bar, with history (push, typing, popstate)
@@ -288,10 +392,10 @@ guessed ids, references, embeds, the API, live streams, bulk actions) and
   - `Api.ts`: a JSON `HttpApiGroup` (list, get, create, update, delete) from a resource
   - `Scope.ts`: the `tenant` option: a column scoped by a request-level service
 - `src/auth/`: `Auth.ts` (`CurrentUser`, `CurrentOrg`, `Sessions`), `Password.ts` (scrypt), `Middleware.ts` (`RequireSession`, `Authentication`)
-- `src/ui/`: the design system, copied from `@dw/ui` (document-workflow-service `packages/ui`): StyleX tokens and themes (`theme/`), global CSS and fonts, Button, form styles and the ui-sdk Select, Dialog (`overlay.tsx`), Menu, display pieces and icons
-- `src/islands/`: React islands inside Datastar pages (`Island.tsx`: the `<ds-island>` host; `select.tsx`, `dialog.tsx`, `theme.tsx`: the islands, gathered in `islands.tsx`; `client.tsx`: the browser entry; `loaders.ts`, `mount.tsx`: the code it loads on demand)
+- `src/ui/`: the design system, copied from `@dw/ui` (document-workflow-service `packages/ui`): StyleX tokens and themes (`theme/`), global CSS and fonts, Button, form styles, the ui-sdk Textarea, Select (`form-pickers.tsx`), Combobox (`form-combobox.tsx`), DatePicker (`form-date.tsx`), Dialog (`overlay.tsx`), Menu, display pieces and icons
+- `src/islands/`: React islands inside Datastar pages (`Island.tsx`: the `<ds-island>` host; `select.tsx`, `date.tsx`, `multiselect.tsx`, `dialog.tsx`, `theme.tsx`: the islands, gathered in `islands.tsx`; `client.tsx`: the browser entry; `loaders.ts`, `mount.tsx`: the code it loads on demand)
 - `src/reactivity/`: `Reactivity` across processes (`Broadcast`, `DistributedReactivity`, `SqliteBroadcast`), and `Payload.ts` for invalidations that say what changed
-- `src/app/`: the `users` and `teams` definitions (tenant-scoped by `orgId`), the `Org` model, their assembly with the relation and the team page's members (`Resources.ts`), the JSON API (`Api.ts`), migrations and seed (`Db.ts`), the sign-in page (`Login.tsx`), the layout (`Layout.tsx`) and app composition (`App.tsx`)
+- `src/app/`: the `users`, `teams` and `tags` definitions (all tenant-scoped by `orgId`), the `Org` model, their assembly with the relations and the team page's members (`Resources.ts`), the JSON API (`Api.ts`), migrations and seed (`Db.ts`), the sign-in page (`Login.tsx`), the layout (`Layout.tsx`) and app composition (`App.tsx`)
 - `scripts/build.ts`: the esbuild + StyleX build (`npm run build`, `npm run dev`)
 - `test/`: unit, in-process HTTP, and browser (`test/e2e`) tests
 
@@ -357,19 +461,38 @@ element is where Datastar and React meet:
 - **New options:** when a team changes, the live view re-sends the select with `replace`. The
   old island unmounts, a new one mounts with the new `props`, and `data-bind` gives it the
   current value. The dialog stays open.
+- **Arrays:** Datastar binds an array signal element-wise (one checkbox per element), so the
+  tags multi-select isn't bound with `data-bind`: its value goes in as JSON
+  (`data-attr:data-value="JSON.stringify($users.draft.tags)"`) and comes back on `change`
+  (`$users.draft.tags = [...evt.target.value]`).
+- **Loading:** every island, the Dialog included, is a chunk loaded the first time a page has
+  a host with its name (see "Code splitting" below); the placeholder stays until then, and the
+  host already has its `value`. Once the island has rendered (the first render is synchronous),
+  the host gets `data-island-ready`: until then a click lands on the inert placeholder, so the
+  browser tests wait for it before opening a date picker.
 
 Islands in this app:
 
-- `Select`: the relation field in the create/edit form, a ui-sdk Select. Filters stay native
-  `<select>`s.
+- `Select`: enum and relation fields in the create/edit form (role, team), a ui-sdk Select.
+  Filters stay native `<select>`s.
+- `DateInput`: date fields in the form and the date-range filters, a ui-sdk DatePicker.
+- `MultiSelect`: many-to-many fields (tags), a ui-sdk Combobox in `multiple` mode with
+  colored chips.
 - `Dialog`: the create/edit dialog, a ui-sdk Dialog that is open while `$ns.dialog` is true.
   Escape, the backdrop and the close button emit `close`. Its content is the server-rendered
   form, sent as hidden live markup (`data-island-content`) and moved into the dialog once
-  (`keepMounted`). Datastar binds that form like any other markup from the start, and the
-  select inside it always exists as a patch target, even before the island's code has loaded.
+  (`keepMounted`), straight from that holder in a layout effect. Datastar binds that form like
+  any other markup from the start, and the selects inside it are always in the document as
+  patch targets: before the island's code has loaded, and while it renders. (An earlier
+  version took the nodes out into a fragment before React rendered; a live view's first
+  patch to the team or tags select could land in that gap and fail with
+  `PatchElementsNoTargetsFound`, an occasional e2e failure.)
   The dialog is modal only while open: ui-sdk would otherwise swallow clicks on the page
   during its exit transition (see `src/ui/overlay.tsx`).
 - `Theme`: the Light/Dark/System menu (ui-sdk Menu).
+
+A boolean is a native switch and long text a server-rendered textarea, not islands (see
+"Fields").
 
 **Code splitting.** `islands.js` is only the custom element: no React. Each island is a
 chunk, and React plus the ui-sdk code they share are common chunks, fetched when the first
@@ -377,17 +500,17 @@ host on the page connects. `islands.js` still loads before `datastar.js`, so eve
 upgraded (and has its `value` property) before Datastar binds it; the `value` is kept until
 the island renders it. Sizes (minified, from `npm run build`):
 
-| JavaScript                                   | Before (one bundle) | After                           |
-| -------------------------------------------- | ------------------- | ------------------------------- |
-| loaded before `datastar.js` runs             | 470 KB (157 KB gz)  | 2.2 KB                          |
-| total, `/users` (Theme, Dialog, Select)      | 470 KB              | 437 KB (154 KB gz), 19 files    |
-| total, `/teams`, `/teams/:id` (no Select)    | 470 KB              | 428 KB (151 KB gz), 18 files    |
+| JavaScript                                              | One bundle (before splitting) | Now                          |
+| ------------------------------------------------------- | ----------------------------- | ---------------------------- |
+| loaded before `datastar.js` runs                        | 470 KB (157 KB gz)            | 2.4 KB                       |
+| total, `/users` (Theme, Dialog, Select, DatePicker, Combobox) | —                       | 506 KB (178 KB gz), 25 files |
+| total, `/teams`, `/teams/:id`, `/tags` (Theme, Dialog)  | 470 KB                        | 449 KB (156 KB gz), 20 files |
 
-Every page has the theme menu and a dialog, which between them need React (≈210 KB) and
-most of ui-sdk, so the total shrinks only by the islands a page lacks. The gain is that none
-of it blocks Datastar any more: React and the islands download in parallel while the
-server-rendered page is already live. A new island that only some pages use costs nothing
-elsewhere.
+(The one-bundle figure predates the date picker and combobox.) Every page has the theme menu
+and a dialog, which between them need React (≈210 KB) and most of ui-sdk, so the total
+shrinks only by the islands a page lacks. The gain is that none of it blocks Datastar: React
+and the islands download in parallel while the server-rendered page is already live, and a
+page without a date field never downloads the calendar.
 
 ## Bulk actions
 
@@ -434,6 +557,10 @@ effect `el.checked = $users.selection.includes(87)` and a change handler.
   goes through the same reference check as the edit form (a Globex team is
   "That team no longer exists", and nothing is updated), and `orgId` can never
   be set in bulk.
+- **Many-to-many fields aren't bulk-settable**: "Set <field>…" picks one value, while a
+  user's tags are a set (replace them all? add one?), and `updateMany` writes columns, not
+  join tables. The endpoint doesn't offer such a field even if `bulk.set` names it. A bulk
+  delete does take the rows' join rows along (`ON DELETE CASCADE`).
 - **Partial failures are reported**: "2 deleted, 1 has members" (the team
   resource's `messages.bulkDeleteRestricted`), "1 updated, 1 no longer exists".
   Rows the database kept stay selected; otherwise the selection is cleared.
@@ -454,11 +581,11 @@ that doesn't filter on team, and one re-query in a view that does.
 
 | Mutation                    | Statements | Three single mutations |
 | --------------------------- | ---------- | ---------------------- |
-| bulk set team, 3 users      | 9          | about 3 × 6            |
+| bulk set team, 3 users      | 9          | about 3 × 8            |
 | bulk delete, 3 users        | 24         | 3 × 14                 |
 
-(With the tenant, the team set includes one `SELECT 1 FROM teams … AND orgId = …`
-check, once for all the rows, since they all get the same team.)
+(The team set includes one `SELECT COUNT(*) FROM teams … AND orgId = …` check, once for
+all the rows, since they all get the same team.)
 
 ## How live updates work
 
@@ -477,19 +604,39 @@ version of the row). Each stream then does as little as it can:
   row into or out of the page), and a bare `Reactivity.invalidate(["users"])`
   from outside the repo.
 
-The users view also depends on `teams` (its relation), so renaming or adding a
-team re-renders the table with fresh team labels and re-sends the team selects
-in every open users tab. When the query signals change, the browser re-issues
-the request and Datastar cancels the previous stream.
+The users view also depends on `teams` and `tags` (its relations), and decodes
+their repos' changes too:
 
-`test/queries.test.ts` counts SQL statements per mutation with six open views:
-renaming a visible user went from 19 to 5, editing a user no view shows from 19
-to 2, inserts and deletes from 19 to 13 (team lookups are no longer re-read),
-and a team rename is 20 (19, plus reading the previous version of the team:
-see below). With tenant scoping, an update always reads the previous version
-(it is also the organization check) and checks the user's team (one `SELECT 1`):
-now 6, 3, 13 for an insert and 14 for a delete (which checks the organization
-first), and 20.
+- An insert or update of a team or tag (a rename, a recolor, a new option) can't
+  change which users a page shows. The stream reloads only that table's lookup
+  and re-renders the table from the page it already has; if the table renders
+  the same (the page shows no user with that tag), nothing is sent. The selects
+  of that relation (filter and form) are re-sent only when their options changed.
+- A delete may cascade (deleting a tag deletes its join rows), so it re-queries.
+
+When the query signals change, the browser re-issues the request and Datastar
+cancels the previous stream.
+
+`test/queries.test.ts` counts SQL statements per mutation with six open Acme views.
+Before row-level changes, every mutation was 19 (each view re-ran its page query, COUNT
+and team lookup). Now, with users, teams and tags tenant-scoped and users carrying tags:
+
+| Mutation                      | Statements | Notes                                                                 |
+| ----------------------------- | ---------- | --------------------------------------------------------------------- |
+| rename a visible user         | 7          | BEGIN/COMMIT (a user save is a transaction: its tags), previous version, update, a row re-fetch, the name-sorted view's re-query |
+| edit a user no view shows     | 4          | BEGIN, previous version, update, COMMIT                               |
+| insert a user                 | 13         | no tags, no team: no check and no transaction; page query and COUNT per view |
+| delete a user                 | 14         | the organization check, then as an insert                             |
+| rename a team                 | 8          | previous version (the organization check), update, one lookup per view: no page query or COUNT |
+| change a visible user's tags  | 10         | + the tag check and the join rows' DELETE and INSERT; row patches only (three views show the user) |
+| rename a tag                  | 8          | as a team rename                                                      |
+| delete a tag                  | 26         | cascades: page query, COUNT and both lookups per view                 |
+| bulk set team, 3 users        | 9          | see "Bulk actions"                                                    |
+| bulk delete, 3 users          | 24         | see "Bulk actions"                                                    |
+
+The previous version of a row is always read with a tenant (it is the organization
+check; see also "Across server processes"). References (team, tags) are checked only when
+they change, so a rename doesn't check the user's team or tags.
 
 ### Across server processes
 
@@ -562,28 +709,33 @@ key registered in that process (it tracks `registerUnsafe`, `query` and
 
 `src/crud/Api.ts` derives an Effect `HttpApiGroup` from an assembled resource
 (which carries the relation-aware conflict messages), and `src/app/Api.ts`
-mounts the users and teams groups under `/api`, with the OpenAPI document at
+mounts the users, teams and tags groups under `/api`, with the OpenAPI document at
 `/api/openapi.json` and a Scalar reference at `/api/docs`:
 
 ```ts
 export const UsersApi = Api.make(Resources.resources.users)
 export const TeamsApi = Api.make(Resources.resources.teams)
+export const TagsApi = Api.make(Resources.resources.tags)
 
 export class AppApi extends HttpApi.make("effect-datastar")
   .add(UsersApi.group)
   .add(TeamsApi.group)
+  .add(TagsApi.group)
   .middleware(Authentication)   // the session cookie; provides CurrentOrg to the scoped groups
   .prefix("/api") {}
 
 export const ApiRoutes = Layer.mergeAll(
   HttpApiBuilder.layer(AppApi, { openapiPath: "/api/openapi.json" }),
   HttpApiScalar.layer(AppApi, { path: "/api/docs" })
-).pipe(Layer.provide([UsersApi.layer(AppApi), TeamsApi.layer(AppApi)]), Layer.provide(AuthenticationLive))
+).pipe(
+  Layer.provide([UsersApi.layer(AppApi), TeamsApi.layer(AppApi), TagsApi.layer(AppApi)]),
+  Layer.provide(AuthenticationLive)
+)
 ```
 
 Every endpoint needs the session cookie (401 without one) and works within its
 organization: another organization's ids are 404s, a reference to another
-organization's team is a 409, and `orgId` is not part of the request bodies.
+organization's team or tag is a 409, and `orgId` is not part of the request bodies.
 A group's layer requires the tenant service unless the API's middleware
 provides it.
 
@@ -601,7 +753,7 @@ curl -c jar -H 'content-type: application/json' localhost:3000/login \
   -d '{"login":{"email":"ada@acme.test","password":"demo-password","next":"/users","error":""}}'
 curl -b jar 'localhost:3000/api/users?role=admin&teamId=null&sort=name&dir=asc'
 curl -b jar -X POST localhost:3000/api/users -H 'content-type: application/json' \
-  -d '{"name":"Ada","email":"ada@example.com","role":"admin","teamId":1,"active":true}'
+  -d '{"name":"Ada","email":"ada@example.com","role":"admin","teamId":1,"active":true,"startDate":"2026-03-01","tags":[1,3]}'
 # 201 the new row; the same request again:
 # 409 {"_tag":"Conflict","message":"Email is already taken","fields":{"email":"Email is already taken"}}
 ```
@@ -610,7 +762,9 @@ curl -b jar -X POST localhost:3000/api/users -H 'content-type: application/json'
   per filter) with the same per-field schemas as the live view's signals
   (`Query.params`). Where the page falls back to defaults, the API answers 400.
 - Bodies are the model's `jsonCreate` / `jsonUpdate` (an update replaces every
-  editable field, like the edit dialog); rows are the model's `json` variant.
+  editable field, like the edit dialog); rows are the model's `json` variant. A
+  user's `tags` is an array of tag ids on read and write (`?tags=3` lists the
+  users with tag 3), and `startDate` an ISO date or `null`.
 - `ValidationError` (400) has one message per invalid field or param, all of
   them; `NotFound` (404); `Conflict` (409) for unique and foreign key
   violations, with the resource's `messages`.
