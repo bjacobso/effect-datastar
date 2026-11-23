@@ -4,7 +4,7 @@
  */
 import { type ChildProcess, spawn } from "node:child_process"
 import { createServer } from "node:net"
-import type { Browser, Page } from "playwright"
+import type { Browser, BrowserContext, Page } from "playwright"
 
 export const freePort = () =>
   new Promise<number>((resolve) => {
@@ -33,10 +33,37 @@ export const startServer = async (db: string): Promise<{ readonly url: string; r
   return { url: `http://localhost:${port}`, process: server }
 }
 
+/** Demo accounts (seeded): Acme has teams Platform, Growth and Design and 52 users; Globex Infrastructure and Support, 35. */
+export const ACME = "ada@acme.test"
+export const GLOBEX = "linus@globex.test"
+export const PASSWORD = "demo-password"
+
+/** Fills in and submits the sign-in form on `page` (already on /login). */
+export const submitSignIn = async (page: Page, email: string, password = PASSWORD) => {
+  await page.fill("#login-email", email)
+  await page.fill("#login-password", password)
+  await page.getByRole("button", { name: "Sign in" }).click()
+}
+
+/**
+ * A browser context signed in as `email`, through the sign-in form (its
+ * tabs share the session cookie). Every server on `localhost` sees the
+ * cookie: cookies don't depend on the port.
+ */
+export const signIn = async (browser: Browser, base: string, email: string = ACME): Promise<BrowserContext> => {
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  await page.goto(`${base}/login`)
+  await submitSignIn(page, email)
+  await page.waitForURL(/\/users$/)
+  await page.close()
+  return context
+}
+
 export type Tab = Page & { readonly errors: Array<string> }
 
-/** A new tab on `url`, collecting page errors and console errors, accepting confirms. */
-export const open = async (browser: Browser, url: string): Promise<Tab> => {
+/** A new tab on `url` (in a signed-in context), collecting page errors and console errors, accepting confirms. */
+export const open = async (browser: Browser | BrowserContext, url: string): Promise<Tab> => {
   const page = await browser.newPage()
   const errors: Array<string> = []
   page.on("pageerror", (e) => errors.push(String(e)))

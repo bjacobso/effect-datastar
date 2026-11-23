@@ -7,12 +7,14 @@ import type { ChildProcess } from "node:child_process"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { type Browser, chromium } from "playwright"
+import { type Browser, type BrowserContext, chromium } from "playwright"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
-import { dialog, open as openTab, startServer, total } from "./helpers.ts"
+import { dialog, open as openTab, signIn, startServer, total } from "./helpers.ts"
 
 const servers: Array<ChildProcess> = []
 let browser: Browser
+/** Signed in as ada@acme.test. The cookie reaches both servers (cookies ignore the port), which share the sessions table. */
+let acme: BrowserContext
 let a: string
 let b: string
 let dir: string
@@ -30,6 +32,7 @@ beforeAll(async () => {
   a = await start(db)
   b = await start(db)
   browser = await chromium.launch()
+  acme = await signIn(browser, a)
 })
 
 afterAll(async () => {
@@ -38,7 +41,7 @@ afterAll(async () => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-const open = (base: string, path: string) => openTab(browser, base + path)
+const open = (base: string, path: string) => openTab(acme, base + path)
 
 /** Poll every 5 ms until `check` holds; resolves with the elapsed time. */
 const timeUntil = async (since: number, check: () => Promise<boolean>) => {
@@ -53,7 +56,7 @@ describe("live updates across server processes", () => {
   it("creating a user through one server updates a tab on the other", async () => {
     const onA = await open(a, "/users")
     const onB = await open(b, "/users")
-    await expect.poll(() => total(onB).innerText()).toBe("87 total")
+    await expect.poll(() => total(onB).innerText()).toBe("52 total")
 
     await onA.getByRole("button", { name: "New user" }).click()
     await dialog(onA).locator("input[type=text]").fill("Cross Process")
@@ -61,11 +64,11 @@ describe("live updates across server processes", () => {
     const submitted = Date.now()
     await dialog(onA).locator("button[type=submit]").click()
 
-    const latency = await timeUntil(submitted, async () => (await total(onB).innerText()) === "88 total")
+    const latency = await timeUntil(submitted, async () => (await total(onB).innerText()) === "53 total")
     console.log(`cross-process latency (create user, click to other tab updated): ${latency} ms`)
     // Newest first: the new user tops the default sort.
     await expect.poll(() => onB.locator("tbody tr td:nth-child(2)").first().innerText()).toBe("Cross Process")
-    expect(await total(onA).innerText()).toBe("88 total")
+    expect(await total(onA).innerText()).toBe("53 total")
 
     expect([...onA.errors, ...onB.errors]).toEqual([])
     await onA.close()

@@ -1,7 +1,9 @@
 /**
  * Bulk actions over HTTP (`POST /users/bulk/update`, `POST /teams/bulk/delete`,
- * ...), against the seeded in-memory app: 87 users, 5 teams, every 6th user
- * without a team. Also: restoring the query for Back/Forward (`GET /users/query`).
+ * ...), against the seeded in-memory app, signed in as Acme: its 52 users and
+ * teams 1-3 (Globex has the other 35 users and teams 4-5; see `tenant.test.ts`
+ * for bulk actions across organizations). Also: restoring the query for
+ * Back/Forward (`GET /users/query`).
  */
 import { describe, expect, it } from "vitest"
 import { decode, type Event, makeApp, usersQuery } from "./support.ts"
@@ -24,18 +26,18 @@ const deleteUsers = (selection: ReadonlyArray<unknown>, search = "") =>
 
 describe("bulk update", () => {
   it("sets a field on every selected row, then clears the selection", async () => {
-    const { events } = await setUsers([1, 2, 3], "role", "guest")
+    const { events } = await setUsers([1, 2, 5], "role", "guest")
     expect(toasts(events)).toEqual(["3 updated"])
     expect(signals(events)).toEqual([{ users: { selection: [] } }])
-    for (const id of [1, 2, 3]) expect((await user(id)).role).toBe("guest")
+    for (const id of [1, 2, 5]) expect((await user(id)).role).toBe("guest")
   })
 
   it("sets a relation, and clears it with null", async () => {
-    expect(toasts((await setUsers([4, 5], "teamId", "3")).events)).toEqual(["2 updated"])
-    expect((await user(4)).teamId).toBe(3)
+    expect(toasts((await setUsers([5, 6], "teamId", "3")).events)).toEqual(["2 updated"])
     expect((await user(5)).teamId).toBe(3)
-    expect(toasts((await setUsers([4], "teamId", "null")).events)).toEqual(["1 updated"])
-    expect((await user(4)).teamId).toBeNull()
+    expect((await user(6)).teamId).toBe(3)
+    expect(toasts((await setUsers([5], "teamId", "null")).events)).toEqual(["1 updated"])
+    expect((await user(5)).teamId).toBeNull()
   })
 
   it("reports ids that no longer exist", async () => {
@@ -142,13 +144,13 @@ describe("live views", () => {
   it("a bulk update reaches an open view once, as row patches", async () => {
     // The first two rows of the default list, and a team neither is in.
     const [a, b] = (await json("/api/users")).rows as Array<{ id: number; teamId: number | null }>
-    const team = [1, 2, 3, 4, 5].find((t) => t !== a!.teamId && t !== b!.teamId)!
+    const team = [1, 2, 3].find((t) => t !== a!.teamId && t !== b!.teamId)!
     const s = await app.stream("/users/view", usersQuery())
     await s.until((events) => events.some((e) => e.type === "patch-elements"), { settle: 100 })
-    await setUsers([a!.id, b!.id, 5], "teamId", String(team))
+    await setUsers([a!.id, b!.id, 7], "teamId", String(team))
     const events = await s.until((events) => events.length >= 2, { settle: 300 })
     await s.close()
-    // The team isn't sorted or filtered on: the two visible rows are re-sent (user 5 isn't
+    // The team isn't sorted or filtered on: the two visible rows are re-sent (user 7 isn't
     // on the page), and nothing else: no table, no second wake-up.
     const sent = events.map((e) => e.type === "patch-elements" ? /^<tr id="([^"]+)"/.exec(e.elements)?.[1] : e.type)
     expect(sent.sort()).toEqual([`users-${a!.id}`, `users-${b!.id}`].sort())

@@ -38,6 +38,12 @@
  * embed by name, decodes the scope with the lock field's own schema and applies
  * the lock; anything else is a `ScopeError`.
  *
+ * A tenant (`tenant: { column: "orgId", service: CurrentOrg }`, see `Scope.ts`)
+ * works like a lock whose value comes from a request-level service instead of
+ * the URL: the `Repo` and `Lookup` filter and set the column, the column is
+ * hidden, and the service is in the routes' requirements. It composes with
+ * embed locks (the members embed is bounded by both team and org).
+ *
  * Conventions (from `name`): table name, URL prefix `/${name}`, signal namespace
  * `${name}.{query,draft,errors,dialog}`, DOM id prefix. An embed uses its own
  * `name` for the signal namespace and DOM ids.
@@ -67,6 +73,7 @@ import * as Form from "./Form.ts"
 import * as Lookup from "./Lookup.ts"
 import * as Query from "./Query.ts"
 import * as Repo from "./Repo.ts"
+import type * as Scope from "./Scope.ts"
 import * as UrlState from "./UrlState.ts"
 
 // ---------------------------------------------------------------------------
@@ -94,8 +101,8 @@ export interface LookupOf<Name extends string> {
 /** `RepoOf` and `LookupOf` for each name in a union. */
 export type ServicesOf<Name extends string> = Name extends string ? RepoOf<Name> | LookupOf<Name> : never
 
-/** A lookup service tag (e.g. another resource's `Lookup`). */
-export type LookupTag = Context.Key<LookupOf<string>, Lookup.Lookup>
+/** A lookup service tag (e.g. another resource's `Lookup`). Its requirements are tracked by the resource (`~tenant`). */
+export type LookupTag = Context.Key<LookupOf<string>, Lookup.Lookup<unknown>>
 
 /**
  * What a relation points at: a resource definition. `href` takes the target's
@@ -105,18 +112,26 @@ export interface Target<Id> {
   readonly name: string
   readonly Lookup: LookupTag
   readonly href: (id: Id) => string
+  /** The target's table, id and tenant column, for checking references against the current tenant. */
+  readonly reference: Scope.ReferenceTarget
+  /** Type-level only: the tenant service the target's `Repo` and `Lookup` need. */
+  readonly "~tenant"?: unknown
 }
 type Relations<M extends ModelLike> = {
   readonly [K in Fields<M>]?: K extends keyof M["Type"] ? Target<NonNullable<M["Type"][K]>> : never
 }
 type RelationServices<R> = { [K in keyof R]: R[K] extends { readonly Lookup: Context.Key<infer I, any> } ? I : never }[keyof R]
 type RelationNames<R> = { [K in keyof R]: R[K] extends { readonly name: infer N extends string } ? N : never }[keyof R]
+type RelationTenants<R> = { [K in keyof R]: R[K] extends { readonly "~tenant"?: infer T } ? Exclude<T, undefined> : never }[keyof R]
 
 /** Filter keys configured with the `eq` operator (the ones an embed can lock). */
 type EqKeys<Filters> = { [K in keyof Filters & string]: Filters[K] extends "eq" ? K : never }[keyof Filters & string]
 
-export interface Layout {
-  (props: { readonly title: string; readonly active: string; readonly children: ReactNode }): ReactElement
+/** The page shell. It may read services (e.g. the signed-in account): they join the routes' requirements. */
+export interface Layout<R = never> {
+  (props: { readonly title: string; readonly active: string; readonly children: ReactNode }):
+    | ReactElement
+    | Effect.Effect<ReactElement, never, R>
 }
 
 export interface Config<
@@ -124,7 +139,10 @@ export interface Config<
   M extends ModelLike,
   Id extends Fields<M>,
   Sortable extends Fields<M>,
-  Filters extends Record<string, Query.Operator>
+  Filters extends Record<string, Query.Operator>,
+  TC extends Fields<M> = never,
+  T = never,
+  L = never
 > {
   /** Table name, URL prefix, signal namespace and DOM id prefix. */
   readonly name: Name
@@ -154,7 +172,12 @@ export interface Config<
   readonly columns?: { readonly [K in Fields<M>]?: (row: M["Type"], lookups: Components.Lookups) => ReactNode }
   /** Columns not shown in the table (default: the id). */
   readonly hidden?: ReadonlyArray<Fields<M>>
-  readonly layout: Layout
+  readonly layout: Layout<L>
+  /**
+   * Every row belongs to a tenant: `column` is filtered and set from `service`'s
+   * `id` on every read and write, and hidden like an embed's lock (see `Scope.ts`).
+   */
+  readonly tenant?: Scope.Tenant<TC, T, M["Type"][TC]> | undefined
 }
 
 /** A resource's constraint-violation messages, resolved (see `Config["messages"]`). */
@@ -252,18 +275,34 @@ export const define = <
   M extends ModelLike,
   const Id extends Fields<M> & keyof M["update"]["Type"] & keyof M["Type"],
   const Sortable extends Fields<M>,
-  const Filters extends { readonly [K in Fields<M>]?: Query.Operator }
->(config: Config<Name, M, Id, Sortable, Filters & Record<string, Query.Operator>>) => {
+  const Filters extends { readonly [K in Fields<M>]?: Query.Operator },
+  const TC extends Fields<M> = never,
+  T = never,
+  L = never
+>(config: Config<Name, M, Id, Sortable, Filters & Record<string, Query.Operator>, TC, T, L>) => {
   const { name, model, idColumn } = config
   type FK = keyof Filters & string
   type Row = M["Type"]
   type IdType = M["fields"][Id]["Type"]
 
+  // --- tenant --------------------------------------------------------------
+
+  const tenant = config.tenant
+  const tenantColumn: string | undefined = tenant?.column
+  const encodeTenant = tenant && Schema.encodeUnknownSync(model.fields[tenant.column] as Schema.Codec<unknown, string | number>)
+  const scope: Scope.Scope<T> | undefined = tenant && encodeTenant && {
+    column: tenant.column,
+    value: Effect.map(Effect.service(tenant.service), (s) => ({ id: s.id, encoded: encodeTenant(s.id) })),
+    isolateKeys: tenant.isolateKeys ?? true
+  }
+  const reference: Scope.ReferenceTarget = { table: name, idColumn, tenantColumn }
+
   // --- derived schemas -----------------------------------------------------
 
   const query: Query.QueryDef<Sortable, FK> = Query.make(model, config.query)
-  const formFields = Form.fields(model.jsonCreate)
-  const hidden: ReadonlyArray<string> = config.hidden ?? [idColumn]
+  // The tenant column is never in a form, filter or column: the server owns it.
+  const formFields = Form.fields(model.jsonCreate).filter((f) => f.key !== tenantColumn)
+  const hidden: ReadonlyArray<string> = [...(config.hidden ?? [idColumn]), ...(tenantColumn ? [tenantColumn] : [])]
   const tableFields = Form.fields(model).filter((f) => !hidden.includes(f.key))
 
   // Ids are numbers in the path (TS can't see that through the generic model).
@@ -282,12 +321,15 @@ export const define = <
 
   // --- services ------------------------------------------------------------
 
-  const RepoTag = Context.Service<RepoOf<Name>, Repo.Repo<M, Id, Sortable, FK>>(`${name}/Repo`)
-  const LookupTag = Context.Service<LookupOf<Name>, Lookup.Lookup>(`${name}/Lookup`)
-  const layer = Layer.mergeAll(
-    Layer.effect(RepoTag, Repo.make(model, { table: name, idColumn, query })),
-    Layer.effect(LookupTag, Lookup.make({ table: name, value: idColumn, label: config.display, href }))
-  )
+  const RepoTag = Context.Service<RepoOf<Name>, Repo.Repo<M, Id, Sortable, FK, T>>(`${name}/Repo`)
+  const LookupTag = Context.Service<LookupOf<Name>, Lookup.Lookup<T>>(`${name}/Lookup`)
+  /** `Repo` (checking `references` against the tenant) and `Lookup`. */
+  const layerWith = (references: ReadonlyArray<readonly [string, Scope.ReferenceTarget]>) =>
+    Layer.mergeAll(
+      Layer.effect(RepoTag, Repo.make(model, { table: name, idColumn, query, scope, references })),
+      Layer.effect(LookupTag, Lookup.make({ table: name, value: idColumn, label: config.display, href, scope }))
+    )
+  const layer = layerWith([])
 
   /** What a definition and an assembled resource both expose. */
   const base = {
@@ -304,7 +346,16 @@ export const define = <
     /** Provides `Repo` and `Lookup`. */
     layer,
     /** Link to a row's detail page. */
-    href
+    href,
+    /** Tenant-scoped: the column the server sets and the current tenant's id (e.g. for `Api.make`). */
+    tenant: tenant && {
+      column: tenant.column,
+      id: Effect.map(Effect.service(tenant.service), (s): M["Type"][TC] => s.id)
+    },
+    /** What a relation to this resource checks against the current tenant. */
+    reference,
+    /** Type-level only: the tenant service this resource's `Repo` and `Lookup` need. */
+    "~tenant": undefined as T | undefined
   }
 
   // --- build: everything that depends on relations and embeds -------------
@@ -338,8 +389,13 @@ export const define = <
 
     // --- shared rendering --------------------------------------------------
 
-    const relationServices = Effect.forEach(relations, ([key, tag]) => Effect.map(Effect.service(tag), (l) => [key, l] as const))
-    const lookupsFor = (services: ReadonlyArray<readonly [string, Lookup.Lookup]>) =>
+    // A relation's lookup needs its target's tenant service; that requirement is
+    // tracked in the spec (`RelationTenants`), so here it is treated as this one's.
+    const relationServices = Effect.forEach(
+      relations,
+      ([key, tag]) => Effect.map(Effect.service(tag), (l) => [key, l as unknown as Lookup.Lookup<T>] as const)
+    )
+    const lookupsFor = (services: ReadonlyArray<readonly [string, Lookup.Lookup<T>]>) =>
       Effect.map(
         Effect.forEach(services, ([key, l]) => Effect.map(l.options, (o) => [key, o] as const)),
         (entries): Components.Lookups => Object.fromEntries(entries)
@@ -373,7 +429,7 @@ export const define = <
 
     type Lock = string | undefined
     type Events = Datastar.Events
-    type Req = RepoOf<Name> | LookupOf<string> | HttpServerRequest.HttpServerRequest
+    type Req = RepoOf<Name> | LookupOf<string> | HttpServerRequest.HttpServerRequest | T
     interface Table {
       readonly view: (lock: Lock) => Stream.Stream<Events, never, Req>
       readonly save: (id: IdType | undefined, lock: Lock) => Effect.Effect<Events, never, Req>
@@ -500,9 +556,13 @@ export const define = <
       const { ns, lockKey } = options
       type Q = Query.ListQuery<Sortable, QK>
       const fields = formFields.filter((f) => f.key !== lockKey)
-      // The draft, errors and form leave out the lock: the server owns that field.
-      const { [lockKey ?? ""]: _locked, ...formSchemaFields } = model.jsonCreate.fields as Schema.Struct.Fields
-      const form = { fields: formSchemaFields }
+      // The draft, errors and form leave out the lock and the tenant: the server owns those fields.
+      const serverOwned = (key: string) => key === lockKey || key === tenantColumn
+      const form = {
+        fields: Object.fromEntries(
+          Object.entries(model.jsonCreate.fields as Schema.Struct.Fields).filter(([k]) => !serverOwned(k))
+        ) as Schema.Struct.Fields
+      }
       const keys = fields.map((f) => f.key)
       const blankDraft = Form.blankDraft(form)
       const noErrors = Form.noErrors(keys)
@@ -613,7 +673,8 @@ export const define = <
           let lookups: Components.Lookups = {}
           let lastOptions: string | undefined
           let urlSent = false
-          return repo.live(full, { dependsOn: services.map(([, l]) => l.table) }).pipe(
+          const dependsOn = yield* Effect.forEach(services, ([, l]) => l.key)
+          return repo.live(full, { dependsOn }).pipe(
             // Lookups load with the first page and whenever a related table changes.
             Stream.mapEffect((event) =>
               event._tag === "Page" && event.reason !== "table"
@@ -658,8 +719,9 @@ export const define = <
         Effect.gen(function*() {
           const repo = yield* RepoTag
           const raw = yield* readDraft
-          // The lock is not in the form; the server sets it (and ignores any sent value).
-          const draft = lockKey !== undefined && lock !== undefined ? { ...raw, [lockKey]: lock } : raw
+          // The lock and tenant are not in the form; the server sets them (and ignores any sent value).
+          const locked = lockKey !== undefined && lock !== undefined ? { ...raw, [lockKey]: lock } : raw
+          const draft = scope === undefined ? locked : { ...locked, [scope.column]: (yield* scope.value).encoded }
           // Unlocked tables skip the check: the update itself reports a missing row.
           if (id !== undefined && lock !== undefined) yield* findInScope(id, lock)
           const row = id === undefined
@@ -671,14 +733,21 @@ export const define = <
             SchemaError: (e) => Effect.succeed(fieldErrors(Form.errors(keys, e))),
             SqlError: saveError,
             SignalsError: unexpected,
-            NoSuchElementError: goneToast
+            NoSuchElementError: goneToast,
+            // A reference to a row of another tenant (or a deleted one).
+            InvalidReference: (e) => {
+              const message = messages.invalidReference[e.column] ?? `That ${e.column} no longer exists`
+              return Effect.succeed(e.column === lockKey ? toast(message, "error") : fieldErrors({ [e.column]: message }))
+            }
           })
         )
 
       const openEdit = (id: IdType, lock: Lock) =>
         Effect.gen(function*() {
           const row = yield* findInScope(id, lock)
-          const { [lockKey ?? ""]: _locked, ...draft } = Form.toDraft(model.jsonUpdate, row, row[idColumn])
+          const draft = Object.fromEntries(
+            Object.entries(Form.toDraft(model.jsonUpdate, row, row[idColumn])).filter(([k]) => !serverOwned(k))
+          )
           return Datastar.patchSignals({ [ns]: { dialog: true, draft, errors: noErrors } })
         }).pipe(
           Effect.catchTags({ NoSuchElementError: goneToast, SchemaError: unexpected, SqlError: unexpected })
@@ -748,6 +817,9 @@ export const define = <
           Effect.catchTags({
             SignalsError: badSelection,
             BulkValueError: (e) => Effect.succeed(toast(`Invalid ${e.label.toLowerCase()}`, "error")),
+            // A reference to a row of another tenant (or a deleted one): nothing was changed.
+            InvalidReference: (e) =>
+              Effect.succeed(toast(messages.invalidReference[e.column] ?? `That ${e.column} no longer exists`, "error")),
             SchemaError: unexpected,
             SqlError: (e) => {
               const match = e.reason._tag === "UniqueViolation"
@@ -975,8 +1047,12 @@ export const define = <
     })
     const list = listTable.handlers
 
-    const html = (element: ReactNode, status = 200) =>
-      Effect.sync(() => HttpServerResponse.html(document(element)).pipe(HttpServerResponse.setStatus(status)))
+    /** A page, in the layout (which may be an Effect, e.g. one that reads the signed-in account). */
+    const html = <R,>(page: ReactNode | Effect.Effect<ReactNode, never, R>, status = 200) =>
+      Effect.map(
+        Effect.isEffect(page) ? page : Effect.succeed(page),
+        (element) => HttpServerResponse.html(document(element)).pipe(HttpServerResponse.setStatus(status))
+      )
 
     /** The list page, server-rendered for the query in the URL. */
     const Page = (props: {
@@ -1108,9 +1184,11 @@ export const define = <
         const reactivity = yield* Reactivity.Reactivity
         const services = yield* relationServices
         const id = yield* readId
+        // The tenant's keys (and the bare table key, for invalidations from outside the repo).
+        const keys = [yield* (yield* RepoTag).key, name, ...yield* Effect.forEach(services, ([, l]) => l.key)]
         let lastOptions: string | undefined
         return reactivity.stream(
-          [name, ...services.map(([, l]) => l.table)],
+          [...new Set(keys)],
           Effect.all([findRecord(id), lookupsFor(services)])
         ).pipe(Stream.map(([row, lookups]): Events => {
           const events = [Datastar.patchElements(render(<RecordView row={row} lookups={lookups} />))]
@@ -1234,18 +1312,20 @@ export const define = <
     const R extends Relations<M> = {},
     const S extends ReadonlyArray<SectionInput<Row, IdType>> = readonly []
   >(options: { readonly relations?: R; readonly sections?: S }) => {
-    const relations = Object.entries(options.relations ?? {}).flatMap(([key, target]) =>
-      target === undefined ? [] : [[key, (target as Target<never>).Lookup] as const]
+    const targets = Object.entries(options.relations ?? {}).flatMap(([key, target]) =>
+      target === undefined ? [] : [[key, target as Target<never>] as const]
     )
+    const relations = targets.map(([key, target]) => [key, target.Lookup] as const)
+    const references = targets.map(([key, target]) => [key, target.reference] as const)
     const sections: ReadonlyArray<SectionInput<Row, IdType>> = options.sections ?? []
     const spec: Spec<
       Name,
       RelationNames<R> | EmbedTargets<S[number]>,
-      RepoOf<Name> | Reactivity.Reactivity | RelationServices<R> | SectionRequires<S[number]>,
+      RepoOf<Name> | Reactivity.Reactivity | RelationServices<R> | SectionRequires<S[number]> | T | L | RelationTenants<R>,
       ReturnType<typeof build>["resource"]
     > = {
       name,
-      layer,
+      layer: references.length === 0 ? layer : layerWith(references),
       embeds: sections.flatMap((s) => (typeof s === "function" ? [] : [s])),
       build: (embeds) => build(relations, sections, embeds)
     }

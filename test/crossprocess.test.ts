@@ -36,9 +36,10 @@ const hasAny = (events: Array<Event>) => events.length > 0
 const viewStatements = () => {
   const all = sqlLog.statements.filter((s) => !/reactivity_invalidations|PRAGMA|sqlite_sequence/.test(s))
   return {
-    pages: all.filter((s) => /^\s*SELECT \* FROM "users"\s+(WHERE (?!"id" IN)|ORDER BY)/.test(s)).length,
+    // Page queries are the ones with a LIMIT (A's scoped previous-version read, `"id" = ?`, is not one).
+    pages: all.filter((s) => /^\s*SELECT \* FROM "users"[^]*LIMIT/.test(s)).length,
     counts: all.filter((s) => /COUNT\(\*\)/.test(s)).length,
-    rows: all.filter((s) => /^\s*SELECT \* FROM "users" WHERE "id" IN/.test(s)).length
+    rows: all.filter((s) => /^\s*SELECT \* FROM "users" WHERE \(?"id" IN/.test(s)).length
   }
 }
 

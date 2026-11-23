@@ -6,12 +6,14 @@ import type { ChildProcess } from "node:child_process"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { type Browser, chromium, type Page } from "playwright"
+import { type Browser, type BrowserContext, chromium, type Page } from "playwright"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
-import { dialog, firstColumn, open as openTab, pageText, save, sortBy, startServer, total } from "./helpers.ts"
+import { dialog, firstColumn, open as openTab, pageText, save, signIn, sortBy, startServer, total } from "./helpers.ts"
 
 let server: ChildProcess
 let browser: Browser
+/** Signed in as Acme (ada@acme.test): its 52 users and teams Platform, Growth and Design. */
+let acme: BrowserContext
 let base: string
 let dir: string
 
@@ -21,6 +23,7 @@ beforeAll(async () => {
   server = started.process
   base = started.url
   browser = await chromium.launch()
+  acme = await signIn(browser, base)
 })
 
 afterAll(async () => {
@@ -29,7 +32,7 @@ afterAll(async () => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-const open = (path: string) => openTab(browser, base + path)
+const open = (path: string) => openTab(acme, base + path)
 const bar = (page: Page) => page.locator("[role=toolbar][aria-label='Bulk actions']").first()
 /** A row by `#id`, or by text. */
 const row = (page: Page, key: string) => key.startsWith("#") ? page.locator(key) : page.locator("tbody tr", { hasText: key })
@@ -41,7 +44,7 @@ const search = (page: Page) => new URL(page.url()).search
 describe("bulk actions", () => {
   it("selects rows, sets their team, and clears the selection", async () => {
     const page = await open("/users?name=grace&sort=name&dir=asc")
-    await expect.poll(() => total(page).innerText()).toBe("8 total")
+    await expect.poll(() => total(page).innerText()).toBe("5 total")
     expect(await bar(page).isVisible()).toBe(false)
 
     // By id: names repeat in the seed.
@@ -70,15 +73,15 @@ describe("bulk actions", () => {
 
   it("selects all on the page, and drops ids that leave the page", async () => {
     const page = await open("/users?name=grace&sort=name&dir=asc")
-    await expect.poll(() => total(page).innerText()).toBe("8 total")
+    await expect.poll(() => total(page).innerText()).toBe("5 total")
     const all = page.getByLabel("Select all on this page")
     await all.check()
-    await expect.poll(() => bar(page).innerText()).toContain("8 selected")
-    expect(await page.locator("tbody input[type=checkbox]:checked").count()).toBe(8)
+    await expect.poll(() => bar(page).innerText()).toContain("5 selected")
+    expect(await page.locator("tbody input[type=checkbox]:checked").count()).toBe(5)
 
-    // Narrow the filter: rows that are gone from the page leave the selection.
-    await page.fill(`input[placeholder^="Search name"]`, "grace h")
-    await expect.poll(async () => Number((await total(page).innerText()).split(" ")[0])).toBeLessThan(8)
+    // Narrow the filter (to Acme's two Grace Thompsons): rows that are gone from the page leave the selection.
+    await page.fill(`input[placeholder^="Search name"]`, "grace t")
+    await expect.poll(async () => Number((await total(page).innerText()).split(" ")[0])).toBeLessThan(5)
     const left = await page.locator("tbody tr").count()
     await expect.poll(() => bar(page).innerText()).toContain(`${left} selected`)
     expect(await all.isChecked()).toBe(true)
@@ -191,8 +194,9 @@ describe("back and forward", () => {
   })
 
   it("replaces a non-canonical URL instead of pushing", async () => {
+    // Acme's 52 users are 6 pages.
     const page = await open("/users?page=99&role=root")
-    await expect.poll(() => search(page)).toBe("?page=9")
+    await expect.poll(() => search(page)).toBe("?page=6")
     // Back leaves the page (to the tab's blank start): no entry for the URL it was opened with.
     await page.goBack()
     expect(page.url()).toBe("about:blank")

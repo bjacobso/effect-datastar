@@ -1,5 +1,6 @@
 import { Schema } from "effect"
 import { Model } from "effect/schema"
+import { OrgId } from "./Org.ts"
 import { TeamId } from "./Team.ts"
 
 export const UserId = Schema.Int.pipe(Schema.brand("UserId"))
@@ -29,5 +30,7 @@ export class User extends Model.Class<User>("User")({
   // Relation: nullable foreign key to `teams`. Options come from a lookup at render time.
   teamId: Schema.NullOr(TeamId).annotate({ title: "Team", widget: "select" }),
   active: Model.BooleanSqlite,
+  // The tenant: set by the server from the signed-in account, never shown or sent by forms.
+  orgId: OrgId.annotate({ title: "Organization" }),
   createdAt: Model.DateTimeInsert
 }) {}

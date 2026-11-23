@@ -12,21 +12,31 @@ import { Resources } from "../src/app/Resources.ts"
 import { Teams } from "../src/app/Teams.tsx"
 import { Users } from "../src/app/Users.tsx"
 import * as Db from "../src/app/Db.ts"
+import { Shell } from "../src/app/Layout.tsx"
+import { Team } from "../src/app/Team.ts"
+import { CurrentOrg, CurrentUser, Sessions } from "../src/auth/Auth.ts"
+import { RequireSession } from "../src/auth/Middleware.ts"
 import * as Resource from "../src/crud/Resource.tsx"
 
 /** Type-checked, never run: serve `routes` with `services` provided. */
 const serve = <R,>(
-  routes: Layer.Layer<never, never, HttpRouter.HttpRouter | HttpRouter.Request.From<"Requires", R>>,
+  routes: Layer.Layer<never, unknown, HttpRouter.HttpRouter | HttpRouter.Request.From<"Requires", R>>,
   services: Layer.Layer<R, unknown, never>
 ) => () => HttpRouter.toWebHandler(routes.pipe(Layer.provide(services), Layer.provide(HttpServer.layerServices), Layer.provide(NodeServices.layer)))
 
+type Requirements<L> = L extends Layer.Layer<infer _A, infer _E, infer R> ? R : never
+
 const infra = Layer.mergeAll(Reactivity.layer, Db.layer({ filename: ":memory:" }))
+
+/** The session middleware, ready to provide to routes. */
+const session = RequireSession.layer.pipe(Layer.provide(Sessions.layer), Layer.provide(infra))
+const signedIn = Resources.routes.pipe(Layer.provide(session))
 
 describe("Resource types", () => {
   it("routes require every resource's services", () => {
-    serve(Resources.routes, Resources.layer.pipe(Layer.provideMerge(Reactivity.layer), Layer.provide(infra)))
+    serve(signedIn, Resources.layer.pipe(Layer.provideMerge(Reactivity.layer), Layer.provide(infra)))
     // @ts-expect-error: no `LookupOf<"teams">` / `RepoOf<"teams">` (the teams layer is missing)
-    serve(Resources.routes, Users.layer.pipe(Layer.provideMerge(Reactivity.layer), Layer.provide(infra)))
+    serve(signedIn, Users.layer.pipe(Layer.provideMerge(Reactivity.layer), Layer.provide(infra)))
     expectTypeOf(Resources.layer).toEqualTypeOf<
       Layer.Layer<
         Resource.ServicesOf<"users" | "teams">,
@@ -34,6 +44,49 @@ describe("Resource types", () => {
         import("effect/sql").SqlClient.SqlClient | Reactivity.Reactivity
       >
     >()
+  })
+
+  it("tenant-scoped routes require the tenant service (from the session middleware)", () => {
+    const services = Resources.layer.pipe(Layer.provideMerge(Reactivity.layer), Layer.provide(infra))
+    // @ts-expect-error: `CurrentOrg` (and the layout's `CurrentUser`) are request-level: only middleware provides them
+    serve(Resources.routes, services)
+    expectTypeOf<HttpRouter.Request.From<"Requires", CurrentOrg>>().toExtend<Requirements<typeof Resources.routes>>()
+    // Unscoped and without an effectful layout: no tenant service.
+    const Plain = Resource.define({
+      name: "plain",
+      title: "Plain",
+      noun: "plain",
+      model: Team,
+      idColumn: "id",
+      display: "name",
+      query: { sortable: ["name"], filters: {}, defaultSort: ["name", "asc"], pageSizes: [10] },
+      layout: Shell
+    })
+    const plainApp = () => Resource.app(Plain)
+    expectTypeOf<HttpRouter.Request.From<"Requires", CurrentOrg>>().not.toExtend<
+      Requirements<ReturnType<typeof plainApp>["routes"]>
+    >()
+  })
+
+  it("the tenant option names a model column whose values are the service's ids", () => {
+    const config = {
+      name: "scoped",
+      title: "Scoped",
+      noun: "scoped",
+      model: Team,
+      idColumn: "id",
+      display: "name",
+      query: { sortable: ["name"], filters: {}, defaultSort: ["name", "asc"], pageSizes: [10] },
+      layout: Shell
+    } as const
+    Resource.define({ ...config, tenant: { column: "orgId", service: CurrentOrg } })
+    // @ts-expect-error: `CurrentUser["id"]` is an account id, not an organization id
+    Resource.define({ ...config, tenant: { column: "orgId", service: CurrentUser } })
+    // Type-checked only (it would throw: there is no such field).
+    const noColumn = () =>
+      // @ts-expect-error: `nope` is not a column
+      Resource.define({ ...config, tenant: { column: "nope", service: CurrentOrg } })
+    expect(noColumn).toThrow()
   })
 
   it("an app must include every resource its relations and embeds name", () => {

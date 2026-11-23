@@ -1,3 +1,4 @@
+import { CurrentOrg } from "../auth/Auth.ts"
 import * as Resource from "../crud/Resource.tsx"
 import { Layout } from "./Layout.tsx"
 import { Team } from "./Team.ts"
@@ -20,5 +21,7 @@ export const Teams = Resource.define({
     deleteRestricted: "This team still has members. Move them first.",
     bulkDeleteRestricted: (n) => `${n} ${n === 1 ? "has" : "have"} members`
   },
+  // Every row belongs to the signed-in account's organization (see `crud/Scope.ts`).
+  tenant: { column: "orgId", service: CurrentOrg },
   layout: Layout
 })

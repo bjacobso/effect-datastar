@@ -3,7 +3,7 @@
  * "members", locked to `teamId = :id`. Seeded: team 2 (Growth) has 15 members.
  */
 import { describe, expect, it } from "vitest"
-import { decode, type Event, initialSignals, makeApp, rowNames, usersQuery } from "./support.ts"
+import { ACME, decode, DEMO_PASSWORD, type Event, initialSignals, makeApp, rowNames, signIn, usersQuery } from "./support.ts"
 
 const app = makeApp()
 
@@ -210,24 +210,24 @@ describe("editing on the detail page", () => {
   })
 
   it("edits through the dialog, with validation, and the live record follows", async () => {
-    const s = await app.stream("/teams/4/view", {})
+    const s = await app.stream("/teams/3/view", {})
     await s.until((e) => elements(e, "teams-record") !== "")
-    const edit = await app.action("GET", "/teams/4/edit")
-    expect(signals(edit.events)[0].teams).toMatchObject({ dialog: true, draft: { id: 4 } })
+    const edit = await app.action("GET", "/teams/3/edit")
+    expect(signals(edit.events)[0].teams).toMatchObject({ dialog: true, draft: { id: 3 } })
     const name = signals(edit.events)[0].teams.draft.name
 
-    const invalid = await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name: " " } } })
+    const invalid = await app.action("PUT", "/teams/3", { teams: { draft: { id: 3, name: " " } } })
     expect(signals(invalid.events)[0].teams.errors).toEqual({ name: "Name is required" })
-    const taken = await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name: "Growth" } } })
+    const taken = await app.action("PUT", "/teams/3", { teams: { draft: { id: 3, name: "Growth" } } })
     expect(signals(taken.events)[0].teams.errors).toEqual({ name: "A team with that name already exists" })
 
-    const saved = await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name: "Renamed Here" } } })
+    const saved = await app.action("PUT", "/teams/3", { teams: { draft: { id: 3, name: "Renamed Here" } } })
     expect(toasts(saved.events)).toEqual(["Saved Renamed Here"])
     expect(signals(saved.events)[0].teams).toMatchObject({ dialog: false })
     const next = await s.until((e) => elements(e, "teams-record").includes("Renamed Here"))
     await s.close()
-    expect(decode(elements(next, "teams-record"))).toContain(`@delete('/teams/4?from=detail'`)
-    await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name } } })
+    expect(decode(elements(next, "teams-record"))).toContain(`@delete('/teams/3?from=detail'`)
+    await app.action("PUT", "/teams/3", { teams: { draft: { id: 3, name } } })
   })
 
   it("delete goes back to the list; a restricted delete stays, with a toast", async () => {
@@ -244,15 +244,17 @@ describe("editing on the detail page", () => {
     const pair = cookie.split(";")[0]!
     expect(JSON.parse(decodeURIComponent(pair.slice("flash=".length)))).toEqual({ message: "Deleted", kind: "ok" })
 
-    // The list page shows it once and expires the cookie.
-    const landed = await app.handler(new Request("http://test/teams", { headers: { cookie: pair } }))
+    // The list page shows it once and expires the cookie. (A request with its own cookie
+    // header doesn't get the session added, so it carries the session itself.)
+    const session = `session=${await signIn(app.anonymous.handler, ACME, DEMO_PASSWORD)}`
+    const landed = await app.handler(new Request("http://test/teams", { headers: { cookie: `${pair}; ${session}` } }))
     expect(landed.headers.get("set-cookie")).toMatch(/^flash=;.*(Max-Age=0|Expires=Thu, 01 Jan 1970)/i)
     expect(await landed.text()).toMatch(/<div id="toast" role="status"[^>]*>.*Deleted<\/div>/)
     // Without the cookie: no toast, no Set-Cookie. A cookie that isn't a flash is ignored.
     const plain = await app.handler(new Request("http://test/teams"))
     expect(plain.headers.get("set-cookie")).toBeNull()
     expect(await plain.text()).toContain(`<div id="toast"></div>`)
-    const bogus = await app.handler(new Request("http://test/teams", { headers: { cookie: "flash=%7B%22nope%22%7D" } }))
+    const bogus = await app.handler(new Request("http://test/teams", { headers: { cookie: `flash=%7B%22nope%22%7D; ${session}` } }))
     expect(await bogus.text()).toContain(`<div id="toast"></div>`)
     expect((await app.handler(new Request(`http://test/teams/${id}`))).status).toBe(404)
 

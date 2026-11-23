@@ -1,6 +1,7 @@
 /**
  * The JSON API generated from the resources (`src/crud/Api.ts`, mounted in
- * `src/app/Api.ts`), against the seeded in-memory app: 87 users, 5 teams.
+ * `src/app/Api.ts`), against the seeded in-memory app, signed in as Acme (52 of
+ * the 87 users, teams 1-3). Cross-organization access is in `tenant.test.ts`.
  */
 import { describe, expect, it } from "vitest"
 import { type Event, makeApp, rowNames, usersQuery } from "./support.ts"
@@ -31,7 +32,7 @@ describe("list", () => {
   it("pages with the defaults", async () => {
     const { body, status } = await call("GET", "/api/users")
     expect(status).toBe(200)
-    expect(body).toMatchObject({ total: 87, page: 1, pages: 9 })
+    expect(body).toMatchObject({ total: 52, page: 1, pages: 6 })
     expect(body.rows).toHaveLength(10)
     expect(body.rows[0]).toMatchObject({ id: 87, name: expect.any(String), createdAt: expect.any(String) })
   })
@@ -142,7 +143,7 @@ describe("OpenAPI", () => {
     expect(list.parameters.map((p: { name: string }) => p.name)).toEqual(
       expect.arrayContaining(["page", "pageSize", "sort", "dir", "name", "email", "role", "teamId", "active"])
     )
-    expect(Object.keys(body.paths["/api/users"].post.responses).sort()).toEqual(["201", "400", "409"])
+    expect(Object.keys(body.paths["/api/users"].post.responses).sort()).toEqual(["201", "400", "401", "409"])
   })
 
   it("serves the docs page", async () => {

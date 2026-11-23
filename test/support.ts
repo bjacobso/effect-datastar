@@ -43,7 +43,7 @@ export const makeApp = (options?: {
   readonly filename?: string
   readonly pollInterval?: Duration.Input
 }) => {
-  const { handler, dispose } = HttpRouter.toWebHandler(
+  const { handler: anonymous, dispose } = HttpRouter.toWebHandler(
     Routes.pipe(
       // provideMerge: the routes' per-request requirements are satisfied from the layer's outputs.
       Layer.provideMerge(Infra({
@@ -58,6 +58,53 @@ export const makeApp = (options?: {
   )
   afterAll(() => dispose())
 
+  /** The app as `email` (default: a member of Acme). The session is created on first use. */
+  const as = (email: string = ACME, password: string = DEMO_PASSWORD) => {
+    let cookie: Promise<string> | undefined
+    return client(anonymous, (request) => {
+      cookie ??= signIn(anonymous, email, password)
+      return cookie.then((c) => withCookie(request, c))
+    })
+  }
+
+  return { ...as(), as, anonymous: client(anonymous, (request) => Promise.resolve(request)) }
+}
+
+/** The demo accounts (seeded): Acme has teams 1-3 and 52 users, Globex teams 4-5 and 35 users. */
+export const ACME = "ada@acme.test"
+export const ACME_2 = "grace@acme.test"
+export const GLOBEX = "linus@globex.test"
+export const DEMO_PASSWORD = "demo-password"
+
+/**
+ * Sign in through `POST /login` (as the sign-in form does) and return the
+ * session cookie's value. Fails if the credentials are rejected.
+ */
+export const signIn = async (handler: (request: Request) => Promise<Response>, email: string, password: string) => {
+  const response = await handler(
+    new Request("http://test/login", {
+      method: "POST",
+      headers: { "datastar-request": "true", "content-type": "application/json" },
+      body: JSON.stringify({ login: { email, password, next: "/users", error: "" } })
+    })
+  )
+  const match = /(?:^|,\s*)session=([^;]+)/.exec(response.headers.get("set-cookie") ?? "")
+  if (!match) throw new Error(`sign-in as ${email} failed: ${await response.text()}`)
+  return match[1]!
+}
+
+/** `request` with the session cookie (unless it already has a cookie header). */
+export const withCookie = (request: Request, session: string) => {
+  if (request.headers.has("cookie")) return request
+  const headers = new Headers(request.headers)
+  headers.set("cookie", `session=${session}`)
+  return new Request(request, { headers })
+}
+
+/** Helpers that send every request through `prepare` (e.g. adding a session cookie). */
+type Handler = (request: Request) => Promise<Response>
+const client = (raw: Handler, prepare: (request: Request) => Promise<Request>) => {
+  const handler = async (request: Request) => raw(await prepare(request))
   const url = (path: string) => `http://test${path}`
 
   /** Send a Datastar action and collect the (finite) response events. */
@@ -173,12 +220,13 @@ export const userDraft = (draft: Record<string, unknown>) => ({
 
 /**
  * Text of the first data cell of each row in a rendered table (after the selection
- * checkbox; rows and cells carry StyleX classes).
+ * checkbox; rows and cells carry StyleX classes). Works on decoded HTML too, where the
+ * checkbox's attributes may contain `>` (`(x) => ...`).
  */
 export const rowNames = (html: string) =>
   [
     ...html.matchAll(
-      /<tr id="(?:users|teams|members)-\d+"[^>]*>(?:<td[^>]*><input[^>]*\/?><\/td>)?<td[^>]*>(?:<span[^>]*>|<a [^>]*>)?([^<]*)/g
+      /<tr id="(?:users|teams|members)-\d+"[^>]*>(?:<td[^>]*><input(?:[^>"]|"[^"]*")*\/?><\/td>)?<td[^>]*>(?:<span[^>]*>|<a [^>]*>)?([^<]*)/g
     )
   ].map((m) => m[1])
 

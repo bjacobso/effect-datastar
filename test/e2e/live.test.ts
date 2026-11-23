@@ -6,7 +6,7 @@ import type { ChildProcess } from "node:child_process"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { type Browser, chromium, type Page } from "playwright"
+import { type Browser, type BrowserContext, chromium, type Page } from "playwright"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import {
   closed,
@@ -15,7 +15,9 @@ import {
   open as openTab,
   pageText,
   pickTeam,
+  GLOBEX,
   save,
+  signIn,
   sortBy,
   startServer,
   teamOptions,
@@ -27,6 +29,9 @@ let server: ChildProcess
 let browser: Browser
 let base: string
 let dir: string
+/** Signed in as ada@acme.test (Acme: Platform, Growth, Design, 52 users) and linus@globex.test (Globex). */
+let acme: BrowserContext
+let globex: BrowserContext
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "effect-datastar-"))
@@ -34,6 +39,8 @@ beforeAll(async () => {
   server = started.process
   base = started.url
   browser = await chromium.launch()
+  acme = await signIn(browser, base)
+  globex = await signIn(browser, base, GLOBEX)
 })
 
 afterAll(async () => {
@@ -42,7 +49,8 @@ afterAll(async () => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-const open = (path: string) => openTab(browser, base + path)
+const open = (path: string) => openTab(acme, base + path)
+const openAsGlobex = (path: string) => openTab(globex, base + path)
 const teamColumn = (page: Page) => page.locator("tbody tr td:nth-child(5)").first()
 const filterText = (page: Page, id: string) =>
   page.locator(id).evaluate((s: HTMLSelectElement) => s.selectedOptions[0]!.text)
@@ -50,19 +58,19 @@ const filterText = (page: Page, id: string) =>
 describe("users page", () => {
   it("sorts, pages, filters and changes page size", async () => {
     const page = await open("/users")
-    await expect.poll(() => total(page).innerText()).toBe("87 total")
+    await expect.poll(() => total(page).innerText()).toBe("52 total")
 
     await sortBy(page, "Name")
-    await expect.poll(async () => (await firstColumn(page))[0]).toBe("Ada Hamilton")
+    await expect.poll(async () => (await firstColumn(page))[0]).toBe("Ada Lovelace")
 
     await page.getByRole("button", { name: "Next page" }).click()
-    await expect.poll(() => pageText(page).innerText()).toBe("Page 2 of 9")
+    await expect.poll(() => pageText(page).innerText()).toBe("Page 2 of 6")
 
     await page.locator("nav[aria-label=Pagination] select").selectOption("25")
-    await expect.poll(() => pageText(page).innerText()).toBe("Page 1 of 4")
+    await expect.poll(() => pageText(page).innerText()).toBe("Page 1 of 3")
 
     await page.fill(`input[placeholder^="Search name"]`, "grace")
-    await expect.poll(() => total(page).innerText()).toBe("8 total")
+    await expect.poll(() => total(page).innerText()).toBe("5 total")
 
     await page.locator("#users-filter-teamId").selectOption({ label: "Growth" })
     await expect.poll(() => total(page).innerText()).toBe("2 total")
@@ -146,7 +154,7 @@ describe("team select island", () => {
     const page = await open("/users?email=ken.torvalds79%40")
     await expect.poll(() => total(page).innerText()).toBe("1 total")
     const before = await teamColumn(page).innerText()
-    const next = before === "Support" ? "Infrastructure" : "Support"
+    const next = before === "Design" ? "Growth" : "Design"
 
     await page.locator("tbody button", { hasText: "Edit" }).click()
     await expect.poll(() => teamTrigger(page).innerText()).toBe(before)
@@ -220,9 +228,9 @@ describe("URL state", () => {
   })
 
   it("opens a shared link directly", async () => {
-    const page = await browser.newPage()
+    const page = await acme.newPage()
     await page.goto(base + "/users?teamId=null&pageSize=25")
-    expect(await total(page).innerText()).toBe("14 total")
+    expect(await total(page).innerText()).toBe("7 total")
     await page.close()
   })
 })
@@ -265,7 +273,7 @@ describe("live updates across tabs", () => {
 
     await expect.poll(() => row(viewer).locator("td").nth(1).innerText()).toBe("Row Patched")
     expect(await row(viewer).getAttribute("id")).toBe(id)
-    expect(await total(viewer).innerText()).toBe("87 total")
+    expect(await total(viewer).innerText()).toBe("52 total")
     expect([...editor.errors, ...viewer.errors, ...warnings]).toEqual([])
     await editor.close()
     await viewer.close()
@@ -274,6 +282,8 @@ describe("live updates across tabs", () => {
 
 describe("team detail page", () => {
   it("links from the teams table, shows live members, creates into the team and follows a rename", async () => {
+    // As Globex, whose Support team (5) has 14 members.
+    const open = openAsGlobex
     const detail = await open("/teams")
     await detail.locator("tbody a", { hasText: "Support" }).click()
     await detail.waitForURL(/\/teams\/5$/)
@@ -379,7 +389,7 @@ describe("team detail page", () => {
   })
 
   it("404s for unknown and malformed ids", async () => {
-    const page = await browser.newPage()
+    const page = await acme.newPage()
     expect((await page.goto(base + "/teams/999"))!.status()).toBe(404)
     expect((await page.goto(base + "/teams/abc"))!.status()).toBe(404)
     await page.close()

@@ -28,11 +28,17 @@
  *   and foreign key violations, with the resource's `messages`.
  * - Mutations go through the `Repo`, so every live view (in every process)
  *   updates as it does for the HTML forms.
+ * - A tenant-scoped resource (`tenant` in `Resource.define`) leaves its tenant
+ *   column out of request bodies and sets it from the tenant service, which
+ *   the API's middleware must provide (e.g. `.middleware(Authentication)` on
+ *   the `HttpApi`); otherwise the group layer requires it. Rows of other
+ *   tenants are 404s, references to them 409s.
  */
 import { Effect, Layer, Schema, SchemaIssue } from "effect"
 import type * as Cause from "effect/Cause"
 import type * as Context from "effect/Context"
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema } from "effect/http-api"
+import type { HttpApiEndpoint as Endpoint } from "effect/http-api"
 import type { HttpApiError } from "effect/http-api"
 import type { SqlError } from "effect/sql"
 import type * as Query from "./Query.ts"
@@ -106,33 +112,53 @@ export interface Source<
   M extends ModelLike,
   Id extends keyof M["fields"] & keyof M["Type"] & keyof M["update"]["Type"] & string,
   Sortable extends string,
-  FK extends string
+  FK extends string,
+  R = never
 > {
   readonly name: Name
   readonly noun: string
   readonly model: M
   readonly idColumn: Id
   readonly query: Query.QueryDef<Sortable, FK>
-  readonly Repo: Context.Key<RepoOf<Name>, Repo.Repo<M, Id, Sortable, FK>>
+  readonly Repo: Context.Key<RepoOf<Name>, Repo.Repo<M, Id, Sortable, FK, R>>
   readonly messages: Messages
+  /** For a tenant-scoped resource: the column the server sets, and the current tenant's id. */
+  readonly tenant: { readonly column: string; readonly id: Effect.Effect<unknown, never, R> } | undefined
 }
+
+/**
+ * What a group's handlers need from outside: the `Repo`, the API's
+ * middleware (other than `Validation`, provided here), and whatever the
+ * repo's scope needs that the middleware doesn't provide.
+ */
+export type Requirements<Groups extends HttpApiGroup.Constraint, Name extends string, R> =
+  | RepoOf<Name>
+  | Exclude<Endpoint.Middleware<HttpApiGroup.EndpointsWithIdentifier<Groups, Name>>, Validation>
+  | Endpoint.ExcludeProvided<HttpApiGroup.EndpointsWithIdentifier<Groups, Name>, R>
 
 export const make = <
   const Name extends string,
   M extends ModelLike,
   const Id extends keyof M["fields"] & keyof M["Type"] & keyof M["update"]["Type"] & string,
   Sortable extends string,
-  FK extends string
->(resource: Source<Name, M, Id, Sortable, FK>) => {
-  const { idColumn, messages, model, name, noun, query } = resource
+  FK extends string,
+  R = never
+>(resource: Source<Name, M, Id, Sortable, FK, R>) => {
+  const { idColumn, messages, model, name, noun, query, tenant } = resource
   type Row = M["Type"]
   type IdType = M["fields"][Id]["Type"]
 
   // --- schemas ---------------------------------------------------------------
 
   const RowJson = model.json as unknown as Schema.Codec<Row, Schema.Json>
-  const CreateJson = model.jsonCreate as unknown as Schema.Codec<M["jsonCreate"]["Type"], Schema.Json>
-  const UpdateJson = model.jsonUpdate as unknown as Schema.Codec<M["jsonUpdate"]["Type"], Schema.Json>
+  /** A request body: the variant without the tenant column (the server sets it). */
+  const body = (variant: { readonly fields: Schema.Struct.Fields }) => {
+    if (tenant === undefined) return variant as unknown as Schema.Codec<Readonly<Record<string, unknown>>, Schema.Json>
+    const { [tenant.column]: _tenant, ...fields } = variant.fields
+    return Schema.Struct(fields) as unknown as Schema.Codec<Readonly<Record<string, unknown>>, Schema.Json>
+  }
+  const CreateJson = body(model.jsonCreate)
+  const UpdateJson = body(model.jsonUpdate)
   const IdParam = { id: model.fields[idColumn] as unknown as Schema.Codec<IdType, number> }
   const PageJson = Schema.Struct({
     rows: Schema.Array(RowJson),
@@ -187,6 +213,16 @@ export const make = <
         return Effect.die(e)
     }
   }
+  const invalidReference = (e: Repo.InvalidReference) =>
+    Effect.fail(
+      conflict("A referenced row does not exist", [
+        e.column,
+        messages.invalidReference[e.column] ?? "A referenced row does not exist"
+      ])
+    )
+  /** The payload with the tenant column set to the current tenant. */
+  const withTenant = (payload: Readonly<Record<string, unknown>>) =>
+    tenant === undefined ? Effect.succeed(payload) : Effect.map(tenant.id, (id) => ({ ...payload, [tenant.column]: id }))
   const deleteError = (e: SqlError.SqlError): Effect.Effect<never, Conflict> =>
     e.reason._tag === "ConstraintError"
       ? Effect.fail(conflict(messages.deleteRestricted ?? `This ${noun} is still referenced elsewhere.`))
@@ -206,26 +242,26 @@ export const make = <
   interface Handlers {
     readonly handle: (
       endpoint: "list" | "get" | "create" | "update" | "delete",
-      handler: (request: Request) => Effect.Effect<unknown, NotFound | Conflict>
+      handler: (request: Request) => Effect.Effect<unknown, NotFound | Conflict, R>
     ) => Handlers
   }
   const buildGroup = HttpApiBuilder.group as unknown as <ApiId extends string, Groups extends HttpApiGroup.Constraint>(
     api: HttpApi.HttpApi<ApiId, Groups>,
     group: Name,
     build: (handlers: Handlers) => Effect.Effect<Handlers, never, RepoOf<Name>>
-  ) => Layer.Layer<HttpApiGroup.Service<ApiId, Name>, never, RepoOf<Name>>
+  ) => Layer.Layer<HttpApiGroup.Service<ApiId, Name>, never, Requirements<Groups, Name, R>>
   const construct = <T>(variant: unknown, value: unknown): T => (variant as { make: (v: unknown) => T }).make(value)
 
   /**
    * The handlers, for an `HttpApi` that includes `group` (it may be prefixed).
-   * Requires the resource's `Repo`.
+   * Requires the resource's `Repo`, and its tenant service unless the API's middleware provides it.
    */
   const layer = <ApiId extends string, Groups extends HttpApiGroup.Constraint>(
     api: HttpApi.HttpApi<ApiId, Groups>
-  ): Layer.Layer<HttpApiGroup.Service<ApiId, Name>, never, RepoOf<Name>> =>
+  ): Layer.Layer<HttpApiGroup.Service<ApiId, Name>, never, Exclude<Requirements<Groups, Name, R>, Validation>> =>
     buildGroup(api, name, (handlers) =>
       Effect.map(Effect.service(resource.Repo), (repo) => {
-        const find = (id: IdType): Effect.Effect<Row, NotFound> =>
+        const find = (id: IdType): Effect.Effect<Row, NotFound, R> =>
           repo.findById(id).pipe(
             Effect.catchTag("NoSuchElementError", (_: Cause.NoSuchElementError) => Effect.fail(notFound(id))),
             Effect.catchTags({ SchemaError: Effect.die, SqlError: Effect.die })
@@ -234,21 +270,32 @@ export const make = <
           .handle("list", (r) => repo.list(query.fromParams(r.query)).pipe(Effect.orDie))
           .handle("get", (r) => find(r.params.id))
           .handle("create", (r) =>
-            repo.insert(construct<M["insert"]["Type"]>(model.insert, r.payload)).pipe(
-              Effect.catchTags({ SqlError: saveError, SchemaError: Effect.die })
+            Effect.gen(function*() {
+              return yield* repo.insert(construct<M["insert"]["Type"]>(model.insert, yield* withTenant(r.payload)))
+            }).pipe(
+              Effect.catchTags({ SqlError: saveError, SchemaError: Effect.die, InvalidReference: invalidReference })
             ))
           .handle("update", (r) =>
             Effect.gen(function*() {
               yield* find(r.params.id)
               return yield* repo.update(
-                construct<M["update"]["Type"]>(model.update, { ...r.payload, [idColumn]: r.params.id })
+                construct<M["update"]["Type"]>(model.update, { ...(yield* withTenant(r.payload)), [idColumn]: r.params.id })
               )
-            }).pipe(Effect.catchTags({ SqlError: saveError, SchemaError: Effect.die })))
+            }).pipe(Effect.catchTags({
+              SqlError: saveError,
+              SchemaError: Effect.die,
+              InvalidReference: invalidReference,
+              NoSuchElementError: () => Effect.fail(notFound(r.params.id))
+            })))
           .handle("delete", (r) =>
             Effect.gen(function*() {
               yield* find(r.params.id)
               yield* repo.delete(r.params.id)
-            }).pipe(Effect.catchTags({ SqlError: deleteError, SchemaError: Effect.die })))
+            }).pipe(Effect.catchTags({
+              SqlError: deleteError,
+              SchemaError: Effect.die,
+              NoSuchElementError: () => Effect.fail(notFound(r.params.id))
+            })))
       })).pipe(
         // The group's routes capture the middleware when they are built.
         Layer.provide(validation)

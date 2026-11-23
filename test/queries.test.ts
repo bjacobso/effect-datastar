@@ -36,8 +36,9 @@ describe("SQL statements per mutation", () => {
       sqlLog.reset()
       await run()
       await Promise.all(streams.map((s) => s.collect(250)))
-      // Leave out the cross-process broadcast (one INSERT per mutation, plus timing-dependent polls).
-      const statements = sqlLog.statements.filter((s) => !/reactivity_invalidations|PRAGMA data_version/.test(s))
+      // Leave out the cross-process broadcast (one INSERT per mutation, plus timing-dependent polls)
+      // and the session lookup every request makes (one SELECT).
+      const statements = sqlLog.statements.filter((s) => !/reactivity_invalidations|PRAGMA data_version|FROM sessions/.test(s))
       const kinds = statements.map((s) => s.trim().split(/\s+/).slice(0, 3).join(" "))
       const counts = new Map<string, number>()
       for (const k of kinds) counts.set(k, (counts.get(k) ?? 0) + 1)
@@ -61,33 +62,41 @@ describe("SQL statements per mutation", () => {
     await measure("delete", () => app.action("DELETE", "/users/88"))
     await measure("rename team", () => app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth Eng" } } }))
     const bulk = (path: string, users: Record<string, unknown>) => () => app.action("POST", path, { users })
-    // Users 84-82 are on page 1 of the default list, none is in team 4.
-    await measure("bulk set team, 3 users", bulk("/users/bulk/update", { selection: [84, 83, 82], bulk: { field: "teamId", value: "4" } }))
-    await measure("bulk set role, 3 users", bulk("/users/bulk/update", { selection: [84, 83, 82], bulk: { field: "role", value: "guest" } }))
-    await measure("bulk delete, 3 users", bulk("/users/bulk/delete", { selection: [84, 83, 82] }))
+    // Users 86, 82 and 81 are Acme's, on page 1 of the default list, and none is in team 1
+    // (Acme's; 84 and 83 are Globex's and not on Acme's pages at all).
+    const three = [86, 82, 81]
+    await measure("bulk set team, 3 users", bulk("/users/bulk/update", { selection: three, bulk: { field: "teamId", value: "1" } }))
+    await measure("bulk set role, 3 users", bulk("/users/bulk/update", { selection: three, bulk: { field: "role", value: "guest" } }))
+    await measure("bulk delete, 3 users", bulk("/users/bulk/delete", { selection: three }))
 
     await Promise.all(streams.map((s) => s.close()))
+    // Users and teams are tenant-scoped: reading the previous version is also the
+    // "is it in my organization" check, and a user's team is checked to be in the
+    // organization too (`SELECT 1 FROM teams`, when the draft has a team).
     expect(Object.fromEntries(results.map((r) => [r.mutation, r.statements]))).toEqual({
-      // read previous version + update + row re-fetch (page 1) + name-sorted view re-query (2)
-      "rename visible user": 5,
-      // read previous version + update; no view can show the row
-      "toggle active, off-page user": 2,
-      // read previous version + update + row re-fetch (page 1)
-      "change email, visible user": 3,
-      // read previous version + update + row re-fetch (page 1) + role-filtered view re-query (2)
-      "change role (filtered col)": 5,
-      // mutation + page query and COUNT per view
+      // read previous version + team check + update + row re-fetch (page 1) + name-sorted view re-query (2)
+      "rename visible user": 6,
+      // read previous version + team check + update; no view can show the row
+      "toggle active, off-page user": 3,
+      // read previous version + team check + update + row re-fetch (page 1)
+      "change email, visible user": 4,
+      // read previous version + team check + update + row re-fetch (page 1) + role-filtered view re-query (2)
+      "change role (filtered col)": 6,
+      // mutation (no team) + page query and COUNT per view
       "insert": 13,
-      "delete": 13,
+      // tenant check + delete + page query and COUNT per view
+      "delete": 14,
       // read previous version + update + page query, COUNT and team lookup per view. No teams
-      // view is open here, but the previous version is read anyway: views in other
-      // processes may need the changed columns (they travel with the broadcast).
+      // view is open here, but the previous version is read anyway: it is the tenant check,
+      // and views in other processes may need the changed columns (they travel with the broadcast).
       "rename team": 20,
-      // One transaction (BEGIN, read the rows, one UPDATE, COMMIT) and one invalidation for the
-      // three: page 1 re-fetches its visible rows once (1), the team-filtered view re-queries (2).
-      // Three single updates would be 3 × 5.
-      "bulk set team, 3 users": 7,
-      // The same, with the role-filtered view re-querying instead.
+      // One transaction (BEGIN, read the rows in the organization, team check, one UPDATE,
+      // COMMIT) and one invalidation for the three: the two views that show some of them
+      // (page 1 and one other) re-fetch those rows once each (2), the team-filtered view re-queries (2).
+      // The team check runs once: every row gets the same team.
+      "bulk set team, 3 users": 9,
+      // BEGIN, read, UPDATE, COMMIT (no team, no check); page 1 re-fetches its rows (1), the
+      // role-filtered view re-queries (2).
       "bulk set role, 3 users": 7,
       // BEGIN, read the rows, a savepoint + DELETE + release per row, COMMIT (12); then one
       // page query and COUNT per view (12). Three single deletes would be 3 × 13.

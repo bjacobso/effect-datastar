@@ -4,11 +4,14 @@
  *
  *   const TeamLookup = Lookup.make({ table: "teams", value: "id", label: "name" })
  *
- * `options` reads through `effect/sql`, so wrap it in `Reactivity.stream([table], ...)`
- * to keep it live.
+ * `options` reads through `effect/sql`, so wrap it in `Reactivity.stream([yield* lookup.key], ...)`
+ * to keep it live. With a tenant `scope`, the options are the current
+ * tenant's rows only, and `key` is that tenant's key (see `Scope.ts`).
  */
 import { Effect } from "effect"
 import { SqlClient } from "effect/sql"
+import type { SqlError } from "effect/sql"
+import * as Scope from "./Scope.ts"
 
 export interface Option {
   readonly value: string
@@ -17,28 +20,46 @@ export interface Option {
   readonly href?: string | undefined
 }
 
-export interface Lookup {
+/** `R`: what the scope needs (the tenant service), `never` if unscoped. */
+export interface Lookup<R = never> {
   readonly table: string
-  readonly options: Effect.Effect<ReadonlyArray<Option>, import("effect/sql").SqlError.SqlError>
+  readonly options: Effect.Effect<ReadonlyArray<Option>, SqlError.SqlError, R>
+  /** The reactivity key the table's changes are announced on, for the current scope. */
+  readonly key: Effect.Effect<string, never, R>
 }
 
-export const make = (config: {
+export const make = <R = never>(config: {
   readonly table: string
   readonly value: string
   readonly label: string
   readonly href?: ((value: string) => string) | undefined
+  readonly scope?: Scope.Scope<R> | undefined
 }) =>
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
-    const options = sql<{ value: string | number; label: string }>`
-      SELECT ${sql(config.value)} AS value, ${sql(config.label)} AS label
-      FROM ${sql(config.table)} ORDER BY ${sql(config.label)}`.pipe(
-        Effect.map((rows) => rows.map((r): Option => {
-          const value = String(r.value)
-          return config.href ? { value, label: r.label, href: config.href(value) } : { value, label: r.label }
-        }))
-      )
-    return { table: config.table, options } satisfies Lookup
+    const scope = config.scope
+    const current: Effect.Effect<Scope.Current | undefined, never, R> = scope === undefined
+      ? Effect.succeed(undefined)
+      : scope.value
+    const options = Effect.flatMap(current, (v) =>
+      sql<{ value: string | number; label: string }>`
+        SELECT ${sql(config.value)} AS value, ${sql(config.label)} AS label
+        FROM ${sql(config.table)}
+        ${v === undefined || scope === undefined ? sql.literal("") : sql`WHERE ${sql(scope.column)} = ${v.encoded}`}
+        ORDER BY ${sql(config.label)}`.pipe(
+        Effect.map((rows) =>
+          rows.map((r): Option => {
+            const value = String(r.value)
+            return config.href ? { value, label: r.label, href: config.href(value) } : { value, label: r.label }
+          })
+        )
+      ))
+    const key = Effect.map(current, (v) =>
+      v === undefined || scope === undefined || !scope.isolateKeys
+        ? config.table
+        : Scope.key(config.table, scope.column, v.encoded))
+    const lookup: Lookup<R> = { table: config.table, options, key }
+    return lookup
   })
 
 /** `value -> label` map, for rendering foreign keys in tables. */

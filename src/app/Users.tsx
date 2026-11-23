@@ -1,3 +1,4 @@
+import { CurrentOrg } from "../auth/Auth.ts"
 import * as Resource from "../crud/Resource.tsx"
 import { Layout } from "./Layout.tsx"
 import { User } from "./User.ts"
@@ -21,5 +22,7 @@ export const Users = Resource.define({
   },
   // Bulk actions on the selected rows: Delete, plus "Set role…" and "Set team…".
   bulk: { set: ["role", "teamId"] },
+  // Every row belongs to the signed-in account's organization (see `crud/Scope.ts`).
+  tenant: { column: "orgId", service: CurrentOrg },
   layout: Layout
 })
