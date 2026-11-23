@@ -1,6 +1,6 @@
 # effect-datastar
 
-An exploration of a fully Effect-native [Datastar](https://data-star.dev) app: schema-driven CRUD resources (users and teams, related by a foreign key) with pagination, sorting, filtering, create, update and delete, live updates across tabs, and the list state kept in the URL. The server side is end-to-end [Effect](https://effect.website) 4.
+An exploration of a fully Effect-native [Datastar](https://data-star.dev) app: schema-driven CRUD resources (users, teams and tags, related by a foreign key and a many-to-many join table) with pagination, sorting, filtering, create, update and delete, live updates across tabs, and the list state kept in the URL. The server side is end-to-end [Effect](https://effect.website) 4.
 
 ```sh
 npm install
@@ -27,28 +27,36 @@ export const Users = Resource.define({
   idColumn: "id",
   display: "name",
   query: {
-    sortable: ["name", "email", "role", "createdAt"],
-    filters: { name: "contains", email: "contains", role: "eq", teamId: "eq", active: "eq" },
+    sortable: ["name", "email", "role", "createdAt", "startDate"],
+    filters: {
+      name: "contains", email: "contains", role: "eq", teamId: "eq", active: "eq",
+      tags: "has",          // many-to-many: users with this tag
+      createdAt: "range"    // two filters, createdAtFrom and createdAtTo
+    },
     defaultSort: ["createdAt", "desc"],
     pageSizes: [10, 25, 50]
   },
   messages: {
     unique: { email: "Email is already taken" },
-    invalidReference: { teamId: "That team no longer exists" }
+    invalidReference: { teamId: "That team no longer exists", tags: "That tag no longer exists" }
   },
   layout: Layout
 })
 ```
 
 Then the **app**, where relations and detail-page sections are attached once
-every definition is in scope, so users can point at teams while a team's page
-embeds its users:
+every definition is in scope, so users can point at teams and tags while a
+team's page embeds its users:
 
 ```ts
 // src/app/Resources.ts
 export const Resources = Resource.app(
-  Users.with({ relations: { teamId: Teams } }),
-  Teams.with({ sections: [Users.embed({ name: "members", title: "Members", lock: "teamId" })] })
+  Users.with({
+    relations: { teamId: Teams },   // a foreign key column
+    manyToMany: { tags: Tags }      // a join table (see "Fields" below)
+  }),
+  Teams.with({ sections: [Users.embed({ name: "members", title: "Members", lock: "teamId" })] }),
+  Tags
 )
 // App: Resources.routes (every route), Resources.layer (every Repo and Lookup),
 //      Resources.resources.users (endpoints, messages, Page, ...)
@@ -80,7 +88,72 @@ The types catch wiring mistakes (`test/types.test.ts`):
   the missing resources), and routes served without a resource's layer;
 - an embed locking a filter that isn't `eq`, or whose values aren't the parent's
   ids (`lock: "role"` on a team's page);
-- a relation whose field doesn't hold the target's ids (`role: Teams`).
+- a relation whose field doesn't hold the target's ids (`role: Teams`);
+- a many-to-many target missing from the app (`Resource.app(Users.with({ manyToMany: { tags: Tags } }), Teams)`),
+  a many-to-many field whose elements aren't the target's ids (`tags: Teams`), or
+  that isn't an array (`manyToMany: { teamId: Teams }`).
+
+## Fields
+
+Every widget, filter and SQL encoding follows from the model's schemas, not from
+per-field config (`src/crud/Field.ts`, `src/crud/Schemas.ts`):
+
+| Schema                                   | Kind       | Form widget                                    | Table                  |
+| ---------------------------------------- | ---------- | ---------------------------------------------- | ---------------------- |
+| `Schema.String`                          | `string`   | text input (`widget: "email"` for an email)    | text                   |
+| a string with `isMaxLength(200)` or more | `string`   | ui-sdk Textarea (server-rendered)              | text                   |
+| `Schema.Literals([...])`                 | `enum`     | ui-sdk Select island                           | badge                  |
+| a foreign key (`relations`)              | `number`   | ui-sdk Select island, options from the target  | linked label           |
+| `Schema.Boolean` / `Model.BooleanSqlite` | `boolean`  | switch (native checkbox, `role="switch"`)      | Yes / No badge         |
+| `Schemas.LocalDate` (`format: "date"`)   | `date`     | ui-sdk DatePicker island                       | date                   |
+| `DateTime.Utc` (`Model.DateTimeInsert`)  | `datetime` | read-only                                      | date and time          |
+| `Schemas.Color`                          | `string`   | color input                                    | swatch                 |
+| `ManyToMany.Ids(TagId, through)`         | `ids`      | ui-sdk Combobox (multiple) island, with chips  | chips in the tag color |
+
+A `widget` annotation still overrides the derived one.
+
+- **Dates.** `LocalDate` is a calendar date with no time or zone: an ISO
+  `YYYY-MM-DD` string, stored as that text in SQLite and sent as it in JSON
+  (`format: date` in the OpenAPI document). `DateTime.Utc` columns are ISO text
+  too, so a `range` filter compares text: `createdAtFrom=2026-01-01&createdAtTo=2026-01-31`
+  is `createdAt >= '2026-01-01' AND createdAt < '2026-02-01'` (on a date column,
+  `<= to`). In the filter bar a range is two date pickers; both keys round-trip
+  through the URL and are validated like any filter.
+- **Switch, not a ui-sdk Switch island.** `data-bind` already maps a checkbox to
+  a boolean signal, so a native `<input type="checkbox" role="switch">` styled as
+  the ui-sdk Switch (`styles.switch` in `src/ui/form.tsx`) needs no island, no
+  chunk and no host round trip, and works before any island code has loaded.
+- **Textarea.** The ui-sdk Textarea renders a plain `<textarea>` on the server,
+  which Datastar binds; it grows with its text through CSS `field-sizing: content`.
+
+### Many-to-many
+
+Storage is part of the model, the target is attached in the app, as for a
+foreign key:
+
+```ts
+// src/app/User.ts: a field holding tag ids, stored in user_tags(userId, tagId)
+tags: ManyToMany.Ids(TagId, { table: "user_tags", from: "userId", to: "tagId" })
+
+// src/app/Resources.ts: what the ids point at
+Users.with({ manyToMany: { tags: Tags } })
+```
+
+The field is a plain `ReadonlyArray<TagId>` in every variant of the model, so
+rows, form drafts and the JSON API (read and write) all carry it as an array of
+ids. The `through` annotation tells the rest:
+
+- `Repo` reads it with each row (a correlated `json_group_array` subquery in the
+  same statement: no extra query per page or row), and writes the row and its join
+  rows in one transaction, touching only the join rows that changed. A missing
+  tag fails the whole save and maps to the resource's `invalidReference` message.
+- A change to a user's tags is reported as a change to that user's `tags`
+  column: a row patch, unless the view filters on tags.
+- The join table references both sides with `ON DELETE CASCADE` (migration
+  `0003`), so deleting a tag or a user removes its join rows.
+- The target gives the options (the filter select and the dialog's multi-select),
+  the chips (label, link, and the color of its `Schemas.Color` field) and live
+  updates: renaming or recoloring a tag re-renders the users views that show it.
 
 ## Detail pages and embedded "has many" tables
 
@@ -133,15 +206,16 @@ the query string. Its query lives in its signals and resets on reload.
   - `Resource.tsx`: composes everything below into resources (`define`, then `app`)
   - `Query.ts`: query signals schema, SQL `WHERE` / `ORDER BY`, URL params
   - `Repo.ts`: `SqlModel.makeRepository` plus paginated `list` and a `live` stream with row-level updates
+  - `ManyToMany.ts`: many-to-many fields (`Ids`), their SQL reads, writes and `has` filter
   - `Lookup.ts`: options from another table, for foreign-key selects, filters and labels
-  - `Field.ts`, `Form.ts`: field metadata, form drafts (with input coercion) and per-field errors
+  - `Field.ts`, `Form.ts`, `Schemas.ts`: field metadata and widgets derived from schemas (`LocalDate`, `Color`), form drafts (with input coercion) and per-field errors
   - `components.tsx`: generic filter bar, sortable table, pagination, form fields and dialog (React + StyleX)
   - `Feedback.tsx`: toast and unexpected-error patches
   - `Api.ts`: a JSON `HttpApiGroup` (list, get, create, update, delete) from a resource
-- `src/ui/`: the design system, copied from `@dw/ui` (document-workflow-service `packages/ui`): StyleX tokens and themes (`theme/`), global CSS and fonts, Button, form styles and the ui-sdk Select, Dialog (`overlay.tsx`), Menu, display pieces and icons
-- `src/islands/`: React islands inside Datastar pages (`Island.tsx`: the `<ds-island>` host; `islands.tsx`: Select, Dialog, Theme; `client.tsx`: the browser bundle)
+- `src/ui/`: the design system, copied from `@dw/ui` (document-workflow-service `packages/ui`): StyleX tokens and themes (`theme/`), global CSS and fonts, Button, form styles, the ui-sdk Textarea, Select (`form-pickers.tsx`), Combobox (`form-combobox.tsx`), DatePicker (`form-date.tsx`), Dialog (`overlay.tsx`), Menu, display pieces and icons
+- `src/islands/`: React islands inside Datastar pages (`Island.tsx`: the `<ds-island>` host; `select.tsx`, `date.tsx`, `multiselect.tsx`, `dialog.tsx`, `theme.tsx`: one module per island; `registry.ts`: chunk loaders by name; `client.tsx`: the browser bundle)
 - `src/reactivity/`: `Reactivity` across processes (`Broadcast`, `DistributedReactivity`, `SqliteBroadcast`), and `Payload.ts` for invalidations that say what changed
-- `src/app/`: the `users` and `teams` definitions, their assembly with the relation and the team page's members (`Resources.ts`), the JSON API (`Api.ts`), migrations (`Db.ts`) and app composition (`App.tsx`)
+- `src/app/`: the `users`, `teams` and `tags` definitions, their assembly with the relations and the team page's members (`Resources.ts`), the JSON API (`Api.ts`), migrations (`Db.ts`) and app composition (`App.tsx`)
 - `scripts/build.ts`: the esbuild + StyleX build (`npm run build`, `npm run dev`)
 - `test/`: unit, in-process HTTP, and browser (`test/e2e`) tests
 
@@ -161,7 +235,10 @@ the query string. Its query lives in its signals and resets on reload.
   server is bundled too. `scripts/build.ts` runs esbuild with `@stylexjs/unplugin` twice in
   one process, server then browser, and writes:
   - `dist/server.js`, the server, with dependencies left external.
-  - `public/build/islands.js`, React and the islands.
+  - `public/build/islands.js`, React, the island host and the Dialog, and
+    `public/build/chunks/`, one chunk per other island plus shared chunks (about 450 KB
+    for a page without pickers, 520 KB / 180 KB gzipped with all of them, against 470 KB
+    for the single bundle before the date picker and combobox).
   - `public/build/app.css`, the global CSS and fonts plus every StyleX rule from both builds.
     It is served as a static file.
 
@@ -204,11 +281,23 @@ and React meet:
 - **New options:** when a team changes, the live view re-sends the select with `replace`. The
   old island unmounts, a new one mounts with the new `props`, and `data-bind` gives it the
   current value. The dialog stays open.
+- **Arrays:** Datastar binds an array signal element-wise (one checkbox per element), so the
+  tags multi-select isn't bound with `data-bind`: its value goes in as JSON
+  (`data-attr:data-value="JSON.stringify($users.draft.tags)"`) and comes back on `change`
+  (`$users.draft.tags = [...evt.target.value]`).
+- **Loading:** `islands.js` holds the `<ds-island>` element, React and the Dialog. Every other
+  island is a chunk loaded the first time a page has a host with its name
+  (`src/islands/registry.ts`, esbuild `splitting`); the placeholder stays until then, and the
+  host already has its `value`. The Dialog is in the bundle because live views patch the form
+  inside it from their first response.
 
 Islands in this app:
 
-- `Select`: the relation field in the create/edit form, a ui-sdk Select. Filters stay native
-  `<select>`s.
+- `Select`: enum and relation fields in the create/edit form (role, team), a ui-sdk Select.
+  Filters stay native `<select>`s.
+- `DateInput`: date fields in the form and the date-range filters, a ui-sdk DatePicker.
+- `MultiSelect`: many-to-many fields (tags), a ui-sdk Combobox in `multiple` mode with
+  colored chips.
 - `Dialog`: the create/edit dialog, a ui-sdk Dialog that is open while `$ns.dialog` is true.
   Escape, the backdrop and the close button emit `close`. Its content is the server-rendered
   form, sent in a `<template>` and placed once with `keepMounted`. Datastar binds that form like
@@ -232,16 +321,33 @@ version of the row). Each stream then does as little as it can:
   row into or out of the page), and a bare `Reactivity.invalidate(["users"])`
   from outside the repo.
 
-The users view also depends on `teams` (its relation), so renaming or adding a
-team re-renders the table with fresh team labels and re-sends the team selects
-in every open users tab. When the query signals change, the browser re-issues
-the request and Datastar cancels the previous stream.
+The users view also depends on `teams` and `tags` (its relations), and decodes
+their repos' changes too:
+
+- An insert or update of a team or tag (a rename, a recolor, a new option) can't
+  change which users a page shows. The stream reloads only that table's lookup
+  and re-renders the table from the page it already has; if the table renders
+  the same (the page shows no user with that tag), nothing is sent. The selects
+  of that relation (filter and form) are re-sent only when their options changed.
+- A delete may cascade (deleting a tag deletes its join rows), so it re-queries.
+
+When the query signals change, the browser re-issues the request and Datastar
+cancels the previous stream.
 
 `test/queries.test.ts` counts SQL statements per mutation with six open views:
-renaming a visible user went from 19 to 5, editing a user no view shows from 19
-to 2, inserts and deletes from 19 to 13 (team lookups are no longer re-read),
-and a team rename is 20 (19, plus reading the previous version of the team:
-see below).
+
+| Mutation                      | Count | Was | Notes                                                       |
+| ----------------------------- | ----- | --- | ----------------------------------------------------------- |
+| rename a visible user         | 7     | 5   | +BEGIN/COMMIT: a user save is a transaction (its tags)      |
+| edit a user no view shows     | 4     | 2   | same                                                        |
+| insert, delete a user         | 13    | 13  | an insert without tags needs no transaction                 |
+| rename a team                 | 8     | 20  | no page query or COUNT: one lookup per view                 |
+| change a visible user's tags  | 9     | —   | row patches only (three views show the user)                |
+| rename a tag                  | 8     | —   | as a team rename                                            |
+| delete a tag                  | 25    | —   | cascades: page query, COUNT and lookups per view            |
+
+Before row-level changes, every mutation was 19 (each view re-ran its page
+query, COUNT and team lookup). Reading the previous version: see below.
 
 ### Across server processes
 
@@ -314,7 +420,7 @@ key registered in that process (it tracks `registerUnsafe`, `query` and
 
 `src/crud/Api.ts` derives an Effect `HttpApiGroup` from an assembled resource
 (which carries the relation-aware conflict messages), and `src/app/Api.ts`
-mounts the users and teams groups under `/api`, with the OpenAPI document at
+mounts the users, teams and tags groups under `/api`, with the OpenAPI document at
 `/api/openapi.json` and a Scalar reference at `/api/docs`:
 
 ```ts
@@ -343,7 +449,7 @@ export const ApiRoutes = Layer.mergeAll(
 ```sh
 curl 'localhost:3000/api/users?role=admin&teamId=null&sort=name&dir=asc'
 curl -X POST localhost:3000/api/users -H 'content-type: application/json' \
-  -d '{"name":"Ada","email":"ada@example.com","role":"admin","teamId":1,"active":true}'
+  -d '{"name":"Ada","email":"ada@example.com","role":"admin","teamId":1,"active":true,"startDate":"2026-03-01","tags":[1,3]}'
 # 201 the new row; the same request again:
 # 409 {"_tag":"Conflict","message":"Email is already taken","fields":{"email":"Email is already taken"}}
 ```
@@ -352,7 +458,9 @@ curl -X POST localhost:3000/api/users -H 'content-type: application/json' \
   per filter) with the same per-field schemas as the live view's signals
   (`Query.params`). Where the page falls back to defaults, the API answers 400.
 - Bodies are the model's `jsonCreate` / `jsonUpdate` (an update replaces every
-  editable field, like the edit dialog); rows are the model's `json` variant.
+  editable field, like the edit dialog); rows are the model's `json` variant. A
+  user's `tags` is an array of tag ids on read and write (`?tags=3` lists the
+  users with tag 3), and `startDate` an ISO date or `null`.
 - `ValidationError` (400) has one message per invalid field or param, all of
   them; `NotFound` (404); `Conflict` (409) for unique and foreign key
   violations, with the resource's `messages`.
