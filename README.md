@@ -47,7 +47,7 @@ That gives the page (server-rendered for the query in the URL), a live table, fi
 - `src/crud/`: building blocks derived from a schema
   - `Resource.tsx`: composes everything below into a resource
   - `Query.ts`: query signals schema, SQL `WHERE` / `ORDER BY`, URL params
-  - `Repo.ts`: `SqlModel.makeRepository` plus paginated `list` and a reactive `live` stream
+  - `Repo.ts`: `SqlModel.makeRepository` plus paginated `list` and a `live` stream with row-level updates
   - `Lookup.ts`: options from another table, for foreign-key selects, filters and labels
   - `Field.ts`, `Form.ts`: field metadata, form drafts (with input coercion) and per-field errors
   - `components.tsx`: generic filter bar, sortable table, pagination, form fields and dialog (`@kitajs/html`)
@@ -57,13 +57,30 @@ That gives the page (server-rendered for the query in the URL), a live table, fi
 
 ## How live updates work
 
-The table is a long-lived SSE stream (`GET /users/view`). Mutations go through
-`Reactivity.mutation(["users"], ...)`, and the stream re-renders whenever that key
-is invalidated, so every open tab updates. When the query signals change, the
-browser re-issues the request and Datastar cancels the previous stream.
+The table is a long-lived SSE stream (`GET /users/view`) over `Repo.live(query)`.
+Every repo mutation invalidates the row's record key (`{ users: [42] }`, which
+also fires `users`) and hands the open streams a `Change`: insert, delete, or
+update with the columns whose stored value changed (read from the previous
+version of the row). Each stream then does as little as it can:
 
-The users view listens to both `users` and `teams`, so renaming or adding a team
-updates the team column and the team selects in every open users tab.
+- An update that touches none of the query's sort or active filter columns
+  can't change which rows are on the page, their order or the total. If the row
+  is on the page, the stream re-fetches just that row and patches its `<tr>` by
+  id (`users-42`); otherwise it does nothing.
+- Anything else re-runs the page query and COUNT and re-renders the table:
+  inserts, deletes, updates to a sorted or filtered column (which may move a
+  row into or out of the page), and a bare `Reactivity.invalidate(["users"])`
+  from outside the repo.
+
+The users view also depends on `teams` (its relation), so renaming or adding a
+team re-renders the table with fresh team labels and re-sends the team selects
+in every open users tab. When the query signals change, the browser re-issues
+the request and Datastar cancels the previous stream.
+
+`test/queries.test.ts` counts SQL statements per mutation with six open views:
+renaming a visible user went from 19 to 5, editing a user no view shows from 19
+to 2, inserts and deletes from 19 to 13 (team lookups are no longer re-read),
+and a team rename stays at 19.
 
 ## URL state
 

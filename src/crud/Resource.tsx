@@ -244,26 +244,37 @@ export const make = <
     })
 
   /**
-   * Live view: re-runs when this table or any related table changes. Relation
-   * selects are re-sent only when their options changed. The first emission
-   * also patches `${name}._url` (a local signal, never sent back), which the
-   * page mirrors into the address bar.
+   * Live view: the table for the query, kept up to date by `Repo.live`. A page
+   * event re-renders the table; a rows event patches just those `<tr>`s (by
+   * id). Lookups are loaded with the first page and whenever a related table
+   * changes; relation selects are re-sent only when their options changed. The
+   * first emission also patches `${name}._url` (a local signal, never sent
+   * back), which the page mirrors into the address bar.
    */
   const view = Endpoint.make(
     "GET",
     `/${name}/view` as "/resource/view",
     Stream.unwrap(Effect.gen(function*() {
       const repo = yield* RepoTag
-      const reactivity = yield* Reactivity.Reactivity
       const services = yield* relationServices
       const q = yield* readQuery
+      let lookups: Components.Lookups = {}
       let lastOptions: string | undefined
       let urlSent = false
-      return reactivity.stream(
-        [name, ...services.map(([, l]) => l.table)],
-        Effect.all([repo.list(q), lookupsFor(services)])
-      ).pipe(
-        Stream.map(([page, lookups]): Datastar.Events => {
+      return repo.live(q, { dependsOn: services.map(([, l]) => l.table) }).pipe(
+        Stream.mapEffect((event) =>
+          event._tag === "Page" && event.reason !== "table"
+            ? Effect.map(lookupsFor(services), (loaded) => {
+              lookups = loaded
+              return event
+            })
+            : Effect.succeed(event)
+        ),
+        Stream.map((event): Datastar.Events => {
+          if (event._tag === "Rows") {
+            return event.rows.map((row) => Datastar.patchElements(<RowView row={row} lookups={lookups} />))
+          }
+          const page = event.page
           if (page.page > page.pages) {
             // Out of range (e.g. after deleting the last row on the last page): clamp.
             return Datastar.patchSignals({ [name]: { query: { page: page.pages } } })
@@ -372,6 +383,24 @@ export const make = <
       }
     })
 
+  const rowId = (row: Row) => `${name}-${String(row[idColumn])}`
+  const actions = (row: Row) => (
+    <>
+      <button class="link" {...ds.on("click", edit.call({ id: row[idColumn] as any }))}>Edit</button>
+      <button
+        class="link danger"
+        {...ds.on("click", `confirm(${JSON.stringify(`Delete ${label(row)}?`)}) && ${remove.call({ id: row[idColumn] as any })}`)}
+      >
+        Delete
+      </button>
+    </>
+  )
+
+  /** A single row, as rendered in the table (same id), for row-level patches. */
+  const RowView = (props: { readonly row: Row; readonly lookups: Components.Lookups }) => (
+    <Components.TableRow row={props.row} columns={columnsFor(props.lookups)} rowId={rowId} actions={actions} />
+  )
+
   const TableView = (props: {
     readonly page: Repo.Page<Row>
     readonly query: Query.ListQuery<Sortable, FK>
@@ -382,20 +411,10 @@ export const make = <
         id={`${name}-rows`}
         columns={columnsFor(props.lookups)}
         rows={props.page.rows}
-        rowId={(row) => `${name}-${String(row[idColumn])}`}
+        rowId={rowId}
         query={path("query")}
         current={props.query}
-        actions={(row) => (
-          <>
-            <button class="link" {...ds.on("click", edit.call({ id: row[idColumn] as any }))}>Edit</button>
-            <button
-              class="link danger"
-              {...ds.on("click", `confirm(${JSON.stringify(`Delete ${label(row)}?`)}) && ${remove.call({ id: row[idColumn] as any })}`)}
-            >
-              Delete
-            </button>
-          </>
-        )}
+        actions={actions}
       />
       <Components.Pagination
         query={path("query")}
