@@ -3,6 +3,7 @@
  * "members", locked to `teamId = :id`. Seeded: team 2 (Growth) has 15 members.
  */
 import { describe, expect, it } from "vitest"
+import { sqlLog } from "./sqlCounter.ts"
 import { ACME, decode, DEMO_PASSWORD, type Event, initialSignals, makeApp, rowNames, signIn, usersQuery } from "./support.ts"
 
 const app = makeApp()
@@ -184,6 +185,27 @@ describe("live record", () => {
     expect(elements(next, "teams-record")).toMatch(/<h1[^>]*>Growth Eng<\/h1>/)
     expect(await app.page("/teams/2")).toContain("<title>Growth Eng</title>")
     await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth", description: "" } } })
+  })
+
+  it("wakes for its own row and related tables, not for other rows of the table", async () => {
+    const s = await app.stream("/users/1/view", {})
+    await s.until((e) => elements(e, "users-record") !== "")
+    await s.collect(100)
+    // Another row of the organization changes: the record reads nothing and sends nothing.
+    sqlLog.reset()
+    await app.action("POST", "/users", { users: { draft: { id: "", name: "Elsewhere", email: "elsewhere@example.com", role: "member", teamId: "", active: true, startDate: "", tags: [] } } })
+    expect(await s.collect(200)).toEqual([])
+    expect(sqlLog.statements.filter((q) => /FROM "users" WHERE/.test(q) && /"id" = \?/.test(q))).toEqual([])
+    // A related table changes (a team rename): re-read, but the record shows no change, so nothing is sent.
+    await app.action("PUT", "/teams/3", { teams: { draft: { id: 3, name: "Design Ops", description: "" } } })
+    expect((await s.collect(200)).filter((e) => elements([e], "users-record") !== "")).toEqual([])
+    await app.action("PUT", "/teams/3", { teams: { draft: { id: 3, name: "Design", description: "" } } })
+    // Its own row changes: re-rendered.
+    const { events } = await app.action("GET", "/users/1/edit")
+    const draft = (events[0] as { signals: { users: { draft: Record<string, unknown> } } }).signals.users.draft
+    await app.action("PUT", "/users/1", { users: { draft: { ...draft, name: "Record Ruth" } } })
+    await s.until((e) => elements(e, "users-record").includes("Record Ruth"))
+    await s.close()
   })
 
   it("shows a notice once the team is deleted", async () => {

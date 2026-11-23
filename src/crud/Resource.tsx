@@ -1215,9 +1215,11 @@ export const define = <
       )
 
     /**
-     * Live record: re-renders on any change to this table or a related one (e.g.
-     * a rename), and re-sends the edit dialog's relation selects when their
-     * options change.
+     * Live record: re-renders when this row changes (its record key, e.g.
+     * `users[orgId=1]:42`, which the repo invalidates with every change to the
+     * row) or a related table does (e.g. a rename), and re-sends the edit
+     * dialog's relation selects when their options change. Changes to other rows
+     * of the table don't wake it, and a re-render that comes out the same isn't sent.
      */
     const record = Endpoint.make(
       "GET",
@@ -1226,14 +1228,20 @@ export const define = <
         const reactivity = yield* Reactivity.Reactivity
         const services = yield* relationServices
         const id = yield* readId
-        // The tenant's keys (and the bare table key, for invalidations from outside the repo).
-        const keys = [yield* (yield* RepoTag).key, name, ...yield* Effect.forEach(services, ([, l]) => l.key)]
+        // The row's record key under the tenant's table key (as `Reactivity` derives it from
+        // `{ [key]: [id] }`), the bare table key for invalidations from outside the repo, and
+        // the related tables' keys.
+        const recordKey = `${yield* (yield* RepoTag).key}:${String(encodeId(id))}`
+        const keys = [recordKey, name, ...yield* Effect.forEach(services, ([, l]) => l.key)]
         let lastOptions: string | undefined
+        let lastRecord: string | undefined
         return reactivity.stream(
           [...new Set(keys)],
           Effect.all([findRecord(id), lookupsFor(services)])
         ).pipe(Stream.map(([row, lookups]): Events => {
-          const events = [Datastar.patchElements(render(<RecordView row={row} lookups={lookups} />))]
+          const html = render(<RecordView row={row} lookups={lookups} />)
+          const events = html === lastRecord ? [] : [Datastar.patchElements(html)]
+          lastRecord = html
           const key = JSON.stringify(lookups)
           if (lastOptions !== undefined && key !== lastOptions) events.push(...listTable.fieldSelects(lookups))
           lastOptions = key
