@@ -61,6 +61,12 @@ describe("pages", () => {
     expect(total(html)).toBe(87)
     expect(initialSignals(html).users.query).toEqual(usersQuery().users.query)
   })
+
+  it.each(["1.5", "abc"])("ignores a teamId filter the column's schema rejects (%s)", async (teamId) => {
+    const html = await app.page(`/users?teamId=${teamId}`)
+    expect(total(html)).toBe(87)
+    expect(initialSignals(html).users.query).toEqual(usersQuery().users.query)
+  })
 })
 
 describe("users live view", () => {
@@ -106,6 +112,12 @@ describe("users live view", () => {
 
   it("rejects an invalid query with an error toast", async () => {
     const s = await view(usersQuery({ sort: "password" }), hasAny)
+    await s.close()
+    expect(toasts(s.first)).toEqual(["Something went wrong (SignalsError)"])
+  })
+
+  it.each(["1.5", "abc"])("rejects a teamId filter signal the column's schema rejects (%s)", async (teamId) => {
+    const s = await view(usersQuery({}, { teamId }), hasAny)
     await s.close()
     expect(toasts(s.first)).toEqual(["Something went wrong (SignalsError)"])
   })

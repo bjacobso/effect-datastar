@@ -96,10 +96,28 @@ type SqlHelpers = Statement.Constructor
 
 const escapeLike = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`)
 
-/** Schema for the raw filter string, validated against the field's own type. */
 /** Filter value meaning `IS NULL` (for nullable fields, e.g. "no team"). */
 export const NULL = "null"
 
+const NUMBER = /^-?\d+(\.\d+)?$/
+
+/** Raw filter string -> the field's (decoded) value, before validation. */
+const fromRaw = (field: Field.FieldInfo, raw: string): unknown =>
+  field.kind === "boolean" ? raw === "true" : field.kind === "number" ? Number(raw) : raw
+
+/**
+ * Whether a non-empty `eq` filter value is a valid value of the field: it
+ * parses as the field's kind and the field's own schema accepts it, so
+ * `teamId=1.5` is rejected because `TeamId` is an integer. This is exactly
+ * what `toDbValue` needs to succeed.
+ */
+const isFieldValue = (field: Field.FieldInfo) => {
+  const encode = Schema.encodeUnknownExit(field.schema as Schema.Codec<unknown, unknown>)
+  return (raw: string): boolean =>
+    (field.kind !== "number" || NUMBER.test(raw)) && encode(fromRaw(field, raw))._tag === "Success"
+}
+
+/** Schema for the raw filter string, validated against the field's own schema. */
 const filterSchema = (field: Field.FieldInfo, op: Operator): Schema.Codec<string, string> => {
   if (op === "contains") return Schema.String
   const nulls = field.nullable ? [NULL] : []
@@ -108,20 +126,21 @@ const filterSchema = (field: Field.FieldInfo, op: Operator): Schema.Codec<string
       return Schema.Literals(["", ...nulls, ...field.options]) as any
     case "boolean":
       return Schema.Literals(["", ...nulls, "true", "false"]) as any
-    case "number":
+    default: {
+      const valid = isFieldValue(field)
       return Schema.String.check(
-        Schema.isPattern(field.nullable ? /^(-?\d+(\.\d+)?|null)?$/ : /^(-?\d+(\.\d+)?)?$/)
+        Schema.makeFilter(
+          (raw: string) => raw === "" || (field.nullable && raw === NULL) || valid(raw),
+          { message: `Invalid ${field.label}` }
+        )
       )
-    default:
-      return Schema.String
+    }
   }
 }
 
 /** Raw filter string -> decoded field value -> DB-encoded value. */
-const toDbValue = (field: Field.FieldInfo, raw: string): unknown => {
-  const value = field.kind === "boolean" ? raw === "true" : field.kind === "number" ? Number(raw) : raw
-  return Schema.encodeUnknownSync(field.schema as any)(value)
-}
+const toDbValue = (field: Field.FieldInfo, raw: string): unknown =>
+  Schema.encodeUnknownSync(field.schema as Schema.Codec<unknown, unknown>)(fromRaw(field, raw))
 
 export const make = <
   M extends { readonly fields: Schema.Struct.Fields },
@@ -213,7 +232,7 @@ export const make = <
       parse: (raw) => {
         if (raw === "" || raw === NULL) return undefined
         if (Schema.decodeUnknownExit(filterSchemas[key]!)(raw)._tag !== "Success") return undefined
-        const value = field.kind === "boolean" ? raw === "true" : field.kind === "number" ? Number(raw) : raw
+        const value = fromRaw(field, raw)
         const decoded = decodeField(value)
         return decoded._tag === "Success" && decoded.value !== null ? String(value) : undefined
       },

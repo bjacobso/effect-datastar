@@ -25,7 +25,11 @@ describe("Query schema", () => {
     ["page size not offered", query({ pageSize: 7 })],
     ["enum filter outside the enum", query({}, { role: "root" })],
     ["boolean filter that is not true/false", query({}, { active: "maybe" })],
-    ["non-numeric id filter", query({}, { teamId: "abc" })]
+    ["non-numeric id filter", query({}, { teamId: "abc" })],
+    // Numeric, but not a value of the field's schema (`TeamId` is an integer).
+    ["fractional id filter", query({}, { teamId: "1.5" })],
+    ["number-like but not a number", query({}, { teamId: "1e3" })],
+    ["blank-padded id", query({}, { teamId: " 3" })]
   ])("rejects %s", (_, input) => {
     expect(decode(input)._tag).toBe("Failure")
   })
@@ -101,5 +105,16 @@ describe("Query URL params", () => {
       new URLSearchParams("sort=password&dir=asc&page=-2&pageSize=7&role=root&teamId=2&evil=1")
     )
     expect(q).toEqual(query({ dir: "asc" }, { teamId: "2" }))
+  })
+
+  it.each(["1.5", "abc", "-0.5", "1e3"])("drops a teamId the field's schema rejects (%s)", (teamId) => {
+    const q = UserQuery.fromSearchParams(new URLSearchParams(`teamId=${teamId}&sort=name`))
+    expect(q).toEqual(query({ sort: "name" }))
+  })
+
+  it("every query its schema accepts compiles (the filter values encode)", () => {
+    for (const teamId of ["", "null", "0", "3", "-2"]) {
+      expect(decode(query({}, { teamId }))._tag).toBe("Success")
+    }
   })
 })
