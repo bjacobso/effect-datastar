@@ -2,7 +2,7 @@
  * A JSON API derived from a resource: an `HttpApiGroup` with list, get,
  * create, update and delete, implemented over the resource's `Repo`.
  *
- *   const UsersApi = Api.make(Users)
+ *   const UsersApi = Api.make(Resources.resources.users)   // from `Resource.app(...)`
  *   const AppApi = HttpApi.make("app").add(UsersApi.group).add(TeamsApi.group).prefix("/api")
  *
  *   HttpApiBuilder.layer(AppApi, { openapiPath: "/api/openapi.json" }).pipe(
@@ -97,7 +97,10 @@ export const validation: Layer.Layer<Validation> = HttpApiMiddleware.layerSchema
 // make
 // ---------------------------------------------------------------------------
 
-/** What `make` needs from a resource (`Resource.make`'s result has all of it). */
+/**
+ * What `make` needs from a resource. An assembled resource (`Resource.app(...).resources.users`)
+ * has all of it, including the default messages for its relations.
+ */
 export interface Source<
   Name extends string,
   M extends ModelLike,

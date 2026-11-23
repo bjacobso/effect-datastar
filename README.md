@@ -12,10 +12,14 @@ npm run test:e2e   # browser tests (builds once, real server + Playwright Chromi
 
 Requires Node 24+ (uses `node:sqlite`). For the browser tests, run `npx playwright install chromium` once.
 
-## A resource
+## Resources
+
+A resource is defined in two steps. First a **definition**, a pure value per
+resource with no references to other resources:
 
 ```tsx
-export const Users = Resource.make({
+// src/app/Users.tsx
+export const Users = Resource.define({
   name: "users",
   title: "Users",
   noun: "user",
@@ -28,7 +32,6 @@ export const Users = Resource.make({
     defaultSort: ["createdAt", "desc"],
     pageSizes: [10, 25, 50]
   },
-  relations: { teamId: Teams.Lookup },
   messages: {
     unique: { email: "Email is already taken" },
     invalidReference: { teamId: "That team no longer exists" }
@@ -37,38 +40,83 @@ export const Users = Resource.make({
 })
 ```
 
-That gives the page (server-rendered for the query in the URL), a live table, filters, sorting, paging, a create/edit dialog with per-field validation errors, delete, and the `Repo` / `Lookup` services. Everything it builds is exposed, so a resource can drop down a level when the config isn't enough.
+Then the **app**, where relations and detail-page sections are attached once
+every definition is in scope, so users can point at teams while a team's page
+embeds its users:
+
+```ts
+// src/app/Resources.ts
+export const Resources = Resource.app(
+  Users.with({ relations: { teamId: Teams } }),
+  Teams.with({ sections: [Users.embed({ name: "members", title: "Members", lock: "teamId" })] })
+)
+// App: Resources.routes (every route), Resources.layer (every Repo and Lookup),
+//      Resources.resources.users (endpoints, messages, Page, ...)
+```
+
+That gives each resource a list page (server-rendered for the query in the
+URL), a live table, filters, sorting, paging, a create/edit dialog with
+per-field validation errors, delete, a detail page, and the `Repo` / `Lookup`
+services. A definition with nothing to attach can be passed to `app` as is.
+
+| Route                    |                                             |
+| ------------------------ | ------------------------------------------- |
+| `GET    /users`          | list page                                   |
+| `GET    /users/view`     | live table (SSE)                            |
+| `POST   /users`          | create                                      |
+| `GET    /users/:id/edit` | open the edit dialog                        |
+| `PUT    /users/:id`      | update                                      |
+| `DELETE /users/:id`      | delete                                      |
+| `GET    /users/:id`      | detail page: fields, Edit, Delete, sections |
+| `GET    /users/:id/view` | live record (SSE)                           |
+
+Each route is registered once; embeds reuse them (below). Endpoint paths are
+typed as registered (`Resources.resources.users.endpoints.update.path` is
+`"/users/:id"`), and calls are typed from their params.
+
+The types catch wiring mistakes (`test/types.test.ts`):
+
+- a relation or embed naming a resource that isn't in the app (the error names
+  the missing resources), and routes served without a resource's layer;
+- an embed locking a filter that isn't `eq`, or whose values aren't the parent's
+  ids (`lock: "role"` on a team's page);
+- a relation whose field doesn't hold the target's ids (`role: Teams`).
 
 ## Detail pages and embedded "has many" tables
 
-Every resource also has a detail page, `GET /teams/:id`, with the row's fields
-kept live by `GET /teams/:id/view` (so a rename shows up there too). Unknown and
-malformed ids get a 404 page. The display column links to it, and relation
-cells (a user's team) link to the referenced row's page.
+Every resource has a detail page, `GET /teams/:id`, with the row's fields
+kept live by `GET /teams/:id/view` (so a rename in another tab shows up there
+too). Unknown and malformed ids get a 404 page. The display column links to it,
+and relation cells (a user's team) link to the referenced row's page.
 
-A resource can be embedded in another page with one `eq` filter locked:
+The page has **Edit** and **Delete** for the record. Edit opens the same dialog
+as the list, with the same validation (and, for a user, the team select, whose
+options the live record keeps current). Delete asks for confirmation and, once
+the row is gone, sends the browser back to the list (`?from=detail` tells the
+delete route; `Datastar.redirect` does the navigation). A rejected delete (a
+team that still has members) stays on the page with a toast.
 
-```tsx
-// src/app/TeamDetail.tsx
-export const TeamMembers = Users.embed({ name: "members", title: "Members", lock: "teamId" })
-export const TeamRoutes = Teams.routesWith({ sections: (team) => [TeamMembers.Section(team.id)] })
-// App: Layer.mergeAll(Users.routes, TeamRoutes, TeamMembers.routes, ...)
+A section is an embed of another resource, with one `eq` filter locked to the
+page's row id, or any `(row) => Effect<ReactNode>`:
+
+```ts
+Teams.with({ sections: [Users.embed({ name: "members", title: "Members", lock: "teamId" })] })
 ```
 
 The embed keeps everything the users table has: live updates, sorting, the
 other filters, paging, and the create/edit dialog. It gets its own signal
-namespace (`members.*`) and DOM ids, so it can sit next to a full users table,
-and its own routes under `/users/embed/members/:scope/...`. The lock is enforced
-on the server:
+namespace (`members.*`) and DOM ids, so it can sit next to a full users table.
+It has no routes of its own: it uses the users routes with the scope in the
+URL, `GET /users/view?embed=members&scope=2`, `POST /users?embed=members&scope=2`,
+`PUT /users/7?embed=members&scope=2`, and so on. The lock is enforced on the server:
 
-- `:scope` is decoded with the field's own schema (`/users/embed/members/abc/view` is rejected).
+- `embed` must name an embed of that resource, and `scope` is decoded with the
+  locked field's own schema (`?embed=members&scope=abc` is a `ScopeError`, as are
+  an unknown embed and a scope without an embed).
 - The embed's query schema has no `teamId` filter, and signals that try to set one are rejected.
 - Creates and updates get `teamId` from the server; any value in the draft is ignored.
 - Edits and deletes of rows outside the lock answer "no longer exists".
 - The locked column, filter and form field are hidden.
-
-`Teams.routesWith(...)` exists because users depend on teams (`relations: { teamId: Teams.Lookup }`),
-so the teams config can't name users; the sections are attached where both are in scope.
 
 **URL state:** an embed doesn't sync its query to the URL. The detail page's
 URL identifies the team, and two tables on one page would otherwise fight over
@@ -79,10 +127,10 @@ the query string. Its query lives in its signals and resets on reload.
 - `src/datastar/`: Datastar primitives for Effect HTTP
   - `Datastar.ts`: patch events, SSE `respond` (the handler error type must be `never`), schema-decoded `signals`
   - `Attrs.ts`: signal paths checked against the signals schema, attribute helpers
-  - `Endpoint.ts`: route plus typed client action (`remove.call({ id })` produces `@delete('/users/3')`)
+  - `Endpoint.ts`: route plus typed client action (`remove.call({ id })` produces `@delete('/users/3')`), with an optional param-free path prefix and search params
   - `Html.ts`: React element to HTML string (`render` for patches, `document` for pages)
 - `src/crud/`: building blocks derived from a schema
-  - `Resource.tsx`: composes everything below into a resource
+  - `Resource.tsx`: composes everything below into resources (`define`, then `app`)
   - `Query.ts`: query signals schema, SQL `WHERE` / `ORDER BY`, URL params
   - `Repo.ts`: `SqlModel.makeRepository` plus paginated `list` and a `live` stream with row-level updates
   - `Lookup.ts`: options from another table, for foreign-key selects, filters and labels
@@ -93,7 +141,7 @@ the query string. Its query lives in its signals and resets on reload.
 - `src/ui/`: the design system, copied from `@dw/ui` (document-workflow-service `packages/ui`): StyleX tokens and themes (`theme/`), global CSS and fonts, Button, form styles and the ui-sdk Select, Dialog (`overlay.tsx`), Menu, display pieces and icons
 - `src/islands/`: React islands inside Datastar pages (`Island.tsx`: the `<ds-island>` host; `islands.tsx`: Select, Dialog, Theme; `client.tsx`: the browser bundle)
 - `src/reactivity/`: `Reactivity` across processes (`Broadcast`, `DistributedReactivity`, `SqliteBroadcast`), and `Payload.ts` for invalidations that say what changed
-- `src/app/`: the `users` and `teams` resources, the team detail page with embedded members (`TeamDetail.tsx`), the JSON API (`Api.ts`), migrations (`Db.ts`) and app composition (`App.tsx`)
+- `src/app/`: the `users` and `teams` definitions, their assembly with the relation and the team page's members (`Resources.ts`), the JSON API (`Api.ts`), migrations (`Db.ts`) and app composition (`App.tsx`)
 - `scripts/build.ts`: the esbuild + StyleX build (`npm run build`, `npm run dev`)
 - `test/`: unit, in-process HTTP, and browser (`test/e2e`) tests
 
@@ -202,7 +250,7 @@ see below).
 other's tabs, with no change to the resource code:
 
 ```ts
-Layer.mergeAll(Users.layer, Teams.layer).pipe(
+Resources.layer.pipe(
   Layer.provideMerge(DistributedReactivity.layer),   // Reactivity
   Layer.provide(SqliteBroadcast.layer({ pollInterval })), // Broadcast
   Layer.provideMerge(Db.layer(db))                   // SqlClient
@@ -264,13 +312,14 @@ key registered in that process (it tracks `registerUnsafe`, `query` and
 
 ## JSON API
 
-`src/crud/Api.ts` derives an Effect `HttpApiGroup` from a resource, and
-`src/app/Api.ts` mounts the users and teams groups under `/api`, with the
-OpenAPI document at `/api/openapi.json` and a Scalar reference at `/api/docs`:
+`src/crud/Api.ts` derives an Effect `HttpApiGroup` from an assembled resource
+(which carries the relation-aware conflict messages), and `src/app/Api.ts`
+mounts the users and teams groups under `/api`, with the OpenAPI document at
+`/api/openapi.json` and a Scalar reference at `/api/docs`:
 
 ```ts
-export const UsersApi = Api.make(Users)
-export const TeamsApi = Api.make(Teams)
+export const UsersApi = Api.make(Resources.resources.users)
+export const TeamsApi = Api.make(Resources.resources.teams)
 
 export class AppApi extends HttpApi.make("effect-datastar")
   .add(UsersApi.group)
