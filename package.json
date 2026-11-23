@@ -2,27 +2,19 @@
   "name": "effect-datastar",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
-    "dev": "tsx scripts/build.ts --watch",
-    "start": "npm run build && npm run serve",
-    "typecheck": "tsc --noEmit",
+    "dev": "npm run dev -w @effect-datastar/demo",
+    "start": "npm start -w @effect-datastar/demo",
+    "build": "npm run build -w @effect-datastar/demo",
+    "serve": "npm run serve -w @effect-datastar/demo",
+    "load": "npm run load -w @effect-datastar/demo --",
+    "typecheck": "tsc --noEmit -p . && npm run typecheck --workspaces --if-present",
     "test": "vitest run",
-    "test:e2e": "vitest run --config vitest.e2e.config.ts",
-    "build": "tsx scripts/build.ts",
-    "serve": "NODE_ENV=production node --enable-source-maps dist/server.js",
-    "load": "node scripts/load/run.ts"
-  },
-  "dependencies": {
-    "@effect/platform-node": "^4.1.5",
-    "@effect/sql-sqlite-node": "^4.1.5",
-    "@fontsource-variable/inter": "^5.3.0",
-    "@fontsource/allura": "^5.3.0",
-    "@stylexjs/stylex": "0.19.2",
-    "@ui-sdk/core": "0.1.0-beta.10",
-    "@ui-sdk/react": "0.1.0-beta.10",
-    "effect": "^4.1.5",
-    "react": "19.3.1",
-    "react-dom": "19.3.1"
+    "test:e2e": "npm run test:e2e -w @effect-datastar/demo"
   },
   "devDependencies": {
     "@effect/vitest": "^4.1.5",

@@ -1,10 +1,11 @@
 node_modules
 *.db
 *.db-*
-# Build output: the server bundle, and the client bundle + CSS served from public/
+# Build output, per app: the server bundle, and the client bundle + CSS (+ a copy of datastar.js) served from public/
 dist
-public/build
+**/public/build
+**/public/datastar.js
 # Browser test screenshots
-test/e2e/screenshots
-# Load test databases, results and profiles (scripts/load/)
+**/test/e2e/screenshots
+# Load test databases, results and profiles (apps/demo/scripts/load/)
 .load
