@@ -3,7 +3,7 @@
  * "members", locked to `teamId = :id`. Seeded: team 2 (Growth) has 15 members.
  */
 import { describe, expect, it } from "vitest"
-import { type Event, makeApp, rowNames, usersQuery } from "./support.ts"
+import { decode, type Event, initialSignals, makeApp, rowNames, usersQuery } from "./support.ts"
 
 const app = makeApp()
 
@@ -15,7 +15,6 @@ const toasts = (events: Array<Event>) =>
   events.flatMap((e) => (e.type === "patch-elements" && e.selector === "#toast" ? [e.elements.replace(/<[^>]+>/g, "")] : []))
 const signals = (events: Array<Event>) => events.flatMap((e) => (e.type === "patch-signals" ? [e.signals] : []))
 const total = (html: string) => Number(/(\d+) total/.exec(html)?.[1])
-const decodeEntities = (s: string) => s.replace(/&#34;/g, '"').replace(/&quot;/g, '"').replace(/&amp;/g, "&")
 
 /** Signals for the embedded members table (no `teamId` filter: it's locked). */
 const membersQuery = (overrides: Record<string, unknown> = {}, filters: Record<string, string> = {}) => ({
@@ -46,9 +45,9 @@ const members = async (teamId: number | string, q: unknown, done: (e: Array<Even
 describe("team detail page", () => {
   it("renders the team and exactly its members", async () => {
     const html = await app.page("/teams/2")
-    expect(html).toContain(`<h1>Growth</h1>`)
-    expect(html).toContain(`data-init="@get('/teams/2/view'`)
-    expect(html).toContain(`data-init="@get('/users/embed/members/2/view'`)
+    expect(html).toMatch(/<h1[^>]*>Growth<\/h1>/)
+    expect(decode(html)).toContain(`data-init="@get('/teams/2/view'`)
+    expect(decode(html)).toContain(`data-init="@get('/users/embed/members/2/view'`)
     expect(total(html)).toBe(15)
 
     // Same members as the users list filtered by team.
@@ -67,7 +66,7 @@ describe("team detail page", () => {
     expect(html).not.toContain(`members-filter-teamId`)
     expect(html).not.toContain(`members-field-teamId`)
     expect(html).not.toContain(`>Team</`)
-    const init = JSON.parse(decodeEntities(/data-signals="([^"]*)"/.exec(html)![1]!))
+    const init = initialSignals(html)
     expect(Object.keys(init)).toEqual(["members"])
     expect(init.members.query).toEqual(membersQuery().members.query)
   })
@@ -89,8 +88,8 @@ describe("team detail page", () => {
   })
 
   it("links team names to their detail pages, from teams and from users", async () => {
-    expect(await app.page("/teams")).toContain(`<a href="/teams/2">Growth</a>`)
-    expect(await app.page("/users?teamId=2")).toContain(`<a href="/teams/2">Growth</a>`)
+    expect(await app.page("/teams")).toMatch(/<a href="\/teams\/2"[^>]*>Growth<\/a>/)
+    expect(await app.page("/users?teamId=2")).toMatch(/<a href="\/teams\/2"[^>]*>Growth<\/a>/)
   })
 })
 
@@ -152,13 +151,13 @@ describe("embedded mutations", () => {
     expect(rowNames(membersTable(next))[0]).toBe("New Member")
 
     const page = await app.page("/users?name=New+Member")
-    expect(page).toContain(`<a href="/teams/3">Design</a>`)
+    expect(page).toMatch(/<a href="\/teams\/3"[^>]*>Design<\/a>/)
   })
 
   it("edits within the lock keep the member in the team", async () => {
     const s = await members(3, membersQuery({}, { name: "New Member" }))
     await s.close()
-    const id = /<tr id="members-(\d+)">/.exec(membersTable(s.first))![1]
+    const id = /<tr id="members-(\d+)"/.exec(membersTable(s.first))![1]
     const edit = await app.action("GET", `/users/embed/members/3/${id}/edit`)
     expect(signals(edit.events)[0].members).toMatchObject({ dialog: true, draft: { id: Number(id), name: "New Member" } })
     const saved = await app.action("PUT", `/users/embed/members/3/${id}`, memberDraft({ name: "Renamed Member", email: "new.member@example.com" }))
@@ -177,11 +176,11 @@ describe("live record", () => {
   it("renaming the team updates the detail page", async () => {
     const s = await app.stream("/teams/2/view", {})
     const first = await s.until((e) => elements(e, "teams-record") !== "")
-    expect(elements(first, "teams-record")).toContain("<h1>Growth</h1>")
+    expect(elements(first, "teams-record")).toMatch(/<h1[^>]*>Growth<\/h1>/)
     await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth Eng" } } })
     const next = await s.until((e) => elements(e, "teams-record") !== "")
     await s.close()
-    expect(elements(next, "teams-record")).toContain("<h1>Growth Eng</h1>")
+    expect(elements(next, "teams-record")).toMatch(/<h1[^>]*>Growth Eng<\/h1>/)
     expect(await app.page("/teams/2")).toContain("<title>Growth Eng</title>")
     await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth" } } })
   })

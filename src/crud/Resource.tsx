@@ -33,10 +33,17 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { Reactivity } from "effect/reactivity"
 import type { Model } from "effect/schema"
 import type { SqlClient, SqlError } from "effect/sql"
+import * as stylex from "@stylexjs/stylex"
+import { Fragment, type ReactElement, type ReactNode } from "react"
 import * as ds from "../datastar/Attrs.ts"
 import type { SignalPath } from "../datastar/Attrs.ts"
 import * as Datastar from "../datastar/Datastar.ts"
 import * as Endpoint from "../datastar/Endpoint.ts"
+import { document, render } from "../datastar/Html.ts"
+import { Button } from "../ui/Button.tsx"
+import { Alert, Card, EmptyState, Skeleton } from "../ui/display.tsx"
+import { Icon } from "../ui/icons.tsx"
+import { color, font, space } from "../ui/theme/tokens.stylex.ts"
 import * as Components from "./components.tsx"
 import type * as Field from "./Field.ts"
 import { toast, unexpected } from "./Feedback.tsx"
@@ -77,7 +84,7 @@ type RelationServices<R> = { [K in keyof R]: R[K] extends Context.Key<infer I, a
 type EqKeys<Filters> = { [K in keyof Filters & string]: Filters[K] extends "eq" ? K : never }[keyof Filters & string]
 
 export interface Layout {
-  (props: { readonly title: string; readonly active: string; readonly children: JSX.Element }): JSX.Element
+  (props: { readonly title: string; readonly active: string; readonly children: ReactNode }): ReactElement
 }
 
 export interface Config<
@@ -108,7 +115,7 @@ export interface Config<
     readonly deleteRestricted?: string
   }
   /** Custom table cells. */
-  readonly columns?: { readonly [K in Fields<M>]?: (row: M["Type"], lookups: Components.Lookups) => JSX.Element }
+  readonly columns?: { readonly [K in Fields<M>]?: (row: M["Type"], lookups: Components.Lookups) => ReactNode }
   /** Columns not shown in the table (default: the id). */
   readonly hidden?: ReadonlyArray<Fields<M>>
   readonly layout: Layout
@@ -124,7 +131,7 @@ export interface Messages {
 }
 
 /** A server-rendered section of the detail page. Failures must be handled (rendered) first. */
-export type Section<R> = Effect.Effect<JSX.Element, never, R>
+export type Section<R> = Effect.Effect<ReactNode, never, R>
 
 /** The `:scope` path param of an embed did not decode to a valid lock value. */
 export class ScopeError extends Data.TaggedError("ScopeError")<{ readonly raw: string }> {}
@@ -202,21 +209,21 @@ export const make = <
 
   /** How a field's value is shown: custom cell, linked relation label, linked display, or formatted value. */
   const cell = (field: Field.FieldInfo, lookups: Components.Lookups, options: { readonly link: boolean }) => {
-    const custom = (config.columns as Record<string, ((row: Row, l: Components.Lookups) => JSX.Element) | undefined>)
+    const custom = (config.columns as Record<string, ((row: Row, l: Components.Lookups) => ReactNode) | undefined>)
       ?.[field.key]
     if (custom) return (row: Row) => custom(row, lookups)
     if (relations.some(([k]) => k === field.key)) {
       const byValue = new Map((lookups[field.key] ?? []).map((o) => [o.value, o]))
       return (row: Row) => {
         const v = (row as Record<string, unknown>)[field.key]
-        if (v === null || v === undefined) return <span>—</span>
+        if (v === null || v === undefined) return <span {...stylex.props(styles.subtle)}>—</span>
         const option = byValue.get(String(v))
         if (!option) return <span>?</span>
-        return option.href ? <a href={option.href} safe>{option.label}</a> : <span safe>{option.label}</span>
+        return option.href ? <a href={option.href} {...stylex.props(styles.link)}>{option.label}</a> : <span>{option.label}</span>
       }
     }
     if (options.link && field.key === config.display) {
-      return (row: Row) => <a href={href(row[idColumn])} safe>{label(row)}</a>
+      return (row: Row) => <a href={href(row[idColumn])} {...stylex.props(styles.link, styles.strong)}>{label(row)}</a>
     }
     return undefined
   }
@@ -332,19 +339,21 @@ export const make = <
         return [
           ...(filter
             ? [Datastar.patchElements(
-              <Components.FilterSelect prefix={ns} filter={filter} query={path("query")} lookup={lookups[key]} />,
+              render(<Components.FilterSelect prefix={ns} filter={filter} query={path("query")} lookup={lookups[key]} />),
               { selector: `#${Components.filterId(ns, key)}`, mode: "replace" }
             )]
             : []),
           ...(field
             ? [Datastar.patchElements(
-              <Components.FieldSelect
-                prefix={ns}
-                field={field}
-                draft={path("draft")}
-                errors={path("errors")}
-                lookup={lookups[key]}
-              />,
+              render(
+                <Components.FieldSelect
+                  prefix={ns}
+                  field={field}
+                  draft={path("draft")}
+                  errors={path("errors")}
+                  lookup={lookups[key]}
+                />
+              ),
               { selector: `#${Components.fieldId(ns, key)}`, mode: "replace" }
             )]
             : [])
@@ -387,14 +396,16 @@ export const make = <
           Stream.map((event): Datastar.Events => {
             if (event._tag === "Rows") {
               // Only these rows changed, in ways that can't move them: patch each `<tr>` by id.
-              return event.rows.map((row) => Datastar.patchElements(<RowView row={row} lookups={lookups} lock={value} />))
+              return event.rows.map((row) => Datastar.patchElements(render(<RowView row={row} lookups={lookups} lock={value} />)))
             }
             const page = event.page
             if (page.page > page.pages) {
               // Out of range (e.g. after deleting the last row on the last page): clamp.
               return Datastar.patchSignals({ [ns]: { query: { page: page.pages } } })
             }
-            const events = [Datastar.patchElements(<TableView page={page} current={q} lookups={lookups} lock={value} />)]
+            const events = [
+              Datastar.patchElements(render(<TableView page={page} current={q} lookups={lookups} lock={value} />))
+            ]
             const key = JSON.stringify(lookups)
             if (key !== lastOptions) {
               lastOptions = key
@@ -500,15 +511,10 @@ export const make = <
     const actions = (lock: string | undefined) => (row: Row) => {
       const at = { scope: lock ?? "", id: String(row[idColumn]) }
       return (
-        <>
-          <button class="link" {...ds.on("click", edit.call(at))}>Edit</button>
-          <button
-            class="link danger"
-            {...ds.on("click", `confirm(${JSON.stringify(`Delete ${label(row)}?`)}) && ${remove.call(at)}`)}
-          >
-            Delete
-          </button>
-        </>
+        <Components.RowActions
+          edit={edit.call(at)}
+          remove={`confirm(${JSON.stringify(`Delete ${label(row)}?`)}) && ${remove.call(at)}`}
+        />
       )
     }
 
@@ -523,7 +529,7 @@ export const make = <
       readonly lookups: Components.Lookups
       readonly lock: string | undefined
     }) => (
-      <section id={`${ns}-table`}>
+      <Components.TablePanel id={`${ns}-table`}>
         <Components.Table
           id={`${ns}-rows`}
           columns={columnsFor(props.lookups)}
@@ -540,7 +546,7 @@ export const make = <
           total={props.page.total}
           pageSizes={query.pageSizes}
         />
-      </section>
+      </Components.TablePanel>
     )
 
     interface Initial {
@@ -559,23 +565,27 @@ export const make = <
       return (
         <section
           id={`${ns}-section`}
-          class="resource"
+          {...stylex.props(styles.section)}
           {...ds.merge(
             signals.init(initialSignals as typeof signals.schema.Type),
             scope.syncUrl &&
               ds.effect(`${$("_url")} && ${$("_url")} !== location.pathname + location.search && history.replaceState(null, '', ${$("_url")})`)
           )}
         >
-          <header class="bar">
-            {scope.heading === "h1" ? <h1 safe>{scope.title}</h1> : <h2 safe>{scope.title}</h2>}
-            <button
+          <header {...stylex.props(styles.bar)}>
+            {scope.heading === "h1"
+              ? <h1 {...stylex.props(styles.h1)}>{scope.title}</h1>
+              : <h2 {...stylex.props(styles.h2)}>{scope.title}</h2>}
+            <Button
+              variant="primary"
+              icon="plus"
               {...ds.on(
                 "click",
                 `${$("draft")} = ${JSON.stringify(blankDraft)}; ${$("errors")} = ${JSON.stringify(noErrors)}; ${$("dialog")} = true`
               )}
             >
-              New {config.noun}
-            </button>
+              {`New ${config.noun}`}
+            </Button>
           </header>
           <Components.FilterBar prefix={ns} filters={scope.query.filters} query={path("query")} lookups={props.initial?.lookups} />
           <div
@@ -587,7 +597,13 @@ export const make = <
           >
             {props.initial
               ? <TableView page={props.initial.page} current={props.query} lookups={props.initial.lookups} lock={props.lock} />
-              : <section id={`${ns}-table`} aria-busy="true">Loading…</section>}
+              : (
+                <Components.TablePanel id={`${ns}-table`} busy>
+                  <div {...stylex.props(styles.loading)}>
+                    <Skeleton lines={4} />
+                  </div>
+                </Components.TablePanel>
+              )}
           </div>
           <Components.FormDialog
             prefix={ns}
@@ -649,11 +665,8 @@ export const make = <
     syncUrl: true
   })
 
-  const html = (element: JSX.Element, status = 200) =>
-    Effect.map(
-      typeof element === "string" ? Effect.succeed(element) : Effect.promise(() => element),
-      (body) => HttpServerResponse.html(body).pipe(HttpServerResponse.setStatus(status))
-    )
+  const html = (element: ReactNode, status = 200) =>
+    Effect.sync(() => HttpServerResponse.html(document(element)).pipe(HttpServerResponse.setStatus(status)))
 
   /** The list page, server-rendered for the query in the URL. */
   const Page = (props: {
@@ -689,32 +702,34 @@ export const make = <
   const RecordView = (props: { readonly row: Row | undefined; readonly lookups: Components.Lookups }) => {
     const row = props.row
     return (
-      <section id={`${name}-record`}>
+      <section id={`${name}-record`} {...stylex.props(styles.record)}>
         {row === undefined
           ? (
             <>
-              <h1>Not found</h1>
-              <p safe>{`This ${config.noun} no longer exists.`}</p>
+              <h1 {...stylex.props(styles.h1)}>Not found</h1>
+              <Alert tone="warning">{`This ${config.noun} no longer exists.`}</Alert>
             </>
           )
           : (
             <>
-              <h1 safe>{label(row)}</h1>
-              <dl class="record">
-                {tableFields.map((field) => {
-                  const render = cell(field, props.lookups, { link: false })
-                  return (
-                    <>
-                      <dt safe>{field.label}</dt>
-                      <dd id={`${name}-record-${field.key}`}>
-                        {render
-                          ? render(row)
-                          : <span safe>{Components.formatCell(field, (row as Record<string, unknown>)[field.key])}</span>}
-                      </dd>
-                    </>
-                  )
-                })}
-              </dl>
+              <h1 {...stylex.props(styles.h1)}>{label(row)}</h1>
+              <Card>
+                <dl {...stylex.props(styles.dl)}>
+                  {tableFields.map((field) => {
+                    const custom = cell(field, props.lookups, { link: false })
+                    return (
+                      <div key={field.key} {...stylex.props(styles.dlRow)}>
+                        <dt {...stylex.props(styles.dt)}>{field.label}</dt>
+                        <dd id={`${name}-record-${field.key}`} {...stylex.props(styles.dd)}>
+                          {custom
+                            ? custom(row)
+                            : <Components.CellValue field={field} value={(row as Record<string, unknown>)[field.key]} />}
+                        </dd>
+                      </div>
+                    )
+                  })}
+                </dl>
+              </Card>
             </>
           )}
       </section>
@@ -738,7 +753,7 @@ export const make = <
       return reactivity.stream(
         [name, ...services.map(([, l]) => l.table)],
         Effect.all([findRecord(id), lookupsFor(services)])
-      ).pipe(Stream.map(([row, lookups]) => Datastar.patchElements(<RecordView row={row} lookups={lookups} />)))
+      ).pipe(Stream.map(([row, lookups]) => Datastar.patchElements(render(<RecordView row={row} lookups={lookups} />))))
     })).pipe(Stream.catch((error) => Stream.fromEffect(unexpected(error)))),
     { include: [] }
   )
@@ -749,11 +764,15 @@ export const make = <
       active: `/${name}`,
       children: (
         <main>
-          <h1>Not found</h1>
-          <p safe>{`There is no such ${config.noun}.`}</p>
-          <p>
-            <a href={`/${name}`} safe>{`← ${config.title}`}</a>
-          </p>
+          <Card>
+            <EmptyState
+              icon="alert"
+              title="Not found"
+              action={<a href={`/${name}`} {...stylex.props(styles.link)}>{`Back to ${config.title}`}</a>}
+            >
+              {`There is no such ${config.noun}.`}
+            </EmptyState>
+          </Card>
         </main>
       )
     }),
@@ -776,13 +795,16 @@ export const make = <
           active: `/${name}`,
           children: (
             <main>
-              <p class="crumbs">
-                <a href={`/${name}`} safe>{`← ${config.title}`}</a>
+              <p {...stylex.props(styles.crumbs)}>
+                <a href={`/${name}`} {...stylex.props(styles.crumb)}>
+                  <Icon name="arrowLeft" size={14} />
+                  {config.title}
+                </a>
               </p>
               <div id={`${name}-record-live`} {...ds.init(record.call({ id: String(id.value) }))}>
                 <RecordView row={row} lookups={lookups} />
               </div>
-              {extra}
+              {extra.map((section, i) => <Fragment key={i}>{section}</Fragment>)}
               <Components.Toast />
             </main>
           )
@@ -807,7 +829,7 @@ export const make = <
    * `lock` fixed by the server:
    *
    *   const Members = Users.embed({ name: "members", title: "Members", lock: "teamId" })
-   *   Members.Section(team.id)   // Effect<JSX.Element>, server-rendered
+   *   Members.Section(team.id)   // Effect<ReactNode>, server-rendered
    *   Members.routes             // its live view, create, edit, update, delete
    *
    * The client never sees or sends the locked filter (signals that try to set
@@ -834,7 +856,9 @@ export const make = <
     const Section = (value: Row[Lock & keyof Row]) =>
       Effect.gen(function*() {
         const lock = locked.parse(String(value))
-        if (lock === undefined) return <p class="error" safe>{`Cannot show ${options.title}: invalid ${options.lock}.`}</p>
+        if (lock === undefined) {
+          return <Alert tone="danger">{`Cannot show ${options.title}: invalid ${options.lock}.`}</Alert>
+        }
         const initial = yield* scope.initial(locked.initial, lock)
         return initial._tag === "Some"
           ? <scope.View query={initial.value.query} lock={lock} initial={initial.value} />
@@ -878,3 +902,58 @@ export const make = <
     Page
   }
 }
+
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
+
+const styles = stylex.create({
+  section: { display: "flex", flexDirection: "column", marginBottom: space["--dw-space-10"] },
+  bar: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    gap: space["--dw-space-4"],
+    marginBottom: space["--dw-space-5"]
+  },
+  h1: {
+    fontSize: font["--dw-text-xl"],
+    fontWeight: font["--dw-weight-semibold"],
+    letterSpacing: "-0.02em",
+    lineHeight: font["--dw-leading-tight"]
+  },
+  h2: {
+    fontSize: font["--dw-text-lg"],
+    fontWeight: font["--dw-weight-semibold"],
+    letterSpacing: "-0.01em",
+    lineHeight: font["--dw-leading-tight"]
+  },
+  loading: { padding: space["--dw-space-5"] },
+  link: {
+    color: color["--dw-accent-text"],
+    textDecoration: { default: "none", ":hover": "underline" }
+  },
+  strong: { fontWeight: font["--dw-weight-medium"] },
+  subtle: { color: color["--dw-text-subtle"] },
+  crumbs: { marginBottom: space["--dw-space-4"] },
+  crumb: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: space["--dw-space-1"],
+    color: { default: color["--dw-text-muted"], ":hover": color["--dw-text"] },
+    fontSize: font["--dw-text-sm"],
+    fontWeight: font["--dw-weight-medium"],
+    textDecoration: "none"
+  },
+  record: { display: "flex", flexDirection: "column", gap: space["--dw-space-5"], marginBottom: space["--dw-space-10"] },
+  dl: { display: "flex", flexDirection: "column", gap: space["--dw-space-3"] },
+  dlRow: {
+    display: "grid",
+    gridTemplateColumns: { default: "minmax(120px, 1fr) 3fr", "@media (max-width: 640px)": "minmax(0, 1fr)" },
+    gap: { default: space["--dw-space-3"], "@media (max-width: 640px)": "2px" },
+    alignItems: "baseline"
+  },
+  dt: { color: color["--dw-text-muted"], fontSize: font["--dw-text-sm"] },
+  dd: { minWidth: 0, overflowWrap: "anywhere" }
+})

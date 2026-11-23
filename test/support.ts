@@ -171,6 +171,14 @@ export const userDraft = (draft: Record<string, unknown>) => ({
   users: { draft: { id: "", name: "", email: "", role: "member", teamId: "", active: true, ...draft } }
 })
 
-/** Text of the rows in a rendered table. */
+/** Text of the first cell of each row in a rendered table (rows and cells carry StyleX classes). */
 export const rowNames = (html: string) =>
-  [...html.matchAll(/<tr id="(?:users|teams|members)-\d+"><td>(?:<span>|<a [^>]*>)?([^<]*)/g)].map((m) => m[1])
+  [...html.matchAll(/<tr id="(?:users|teams|members)-\d+"[^>]*><td[^>]*>(?:<span[^>]*>|<a [^>]*>)?([^<]*)/g)].map((m) => m[1])
+
+/** Decodes the entities React's server renderer writes in text and attribute values. */
+export const decode = (html: string) =>
+  html.replace(/&#x27;/g, "'").replace(/&#34;/g, '"').replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+
+/** The initial `data-signals` of a page (the first one). */
+export const initialSignals = (html: string) => JSON.parse(decode(/data-signals="([^"]*)"/.exec(html)![1]!))

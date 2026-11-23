@@ -17,8 +17,8 @@ import { HttpServerRequest, HttpServerResponse } from "effect/http"
 
 export type PatchMode = "outer" | "inner" | "replace" | "prepend" | "append" | "before" | "after" | "remove"
 
-/** Anything kita/html can produce. Async components are awaited before sending. */
-export type Html = string | Promise<string>
+/** Rendered HTML (see `Html.render` for React elements). */
+export type Html = string
 
 export class PatchElements extends Data.TaggedClass("PatchElements")<{
   readonly elements: Html
@@ -53,11 +53,10 @@ const dataLines = (prefix: string, value: string) => value.split("\n").map((line
 
 /** Encode one event in the Datastar SSE wire format. */
 export const encodeEvent = (event: DatastarEvent): Effect.Effect<string> =>
-  Effect.gen(function*() {
+  Effect.sync(() => {
     switch (event._tag) {
       case "PatchElements": {
-        const elements = event.elements
-        const html = typeof elements === "string" ? elements : yield* Effect.promise(() => elements)
+        const html = event.elements
         const lines = ["event: datastar-patch-elements\n"]
         if (event.selector) lines.push(`data: selector ${event.selector}\n`)
         if (event.mode && event.mode !== "outer") lines.push(`data: mode ${event.mode}\n`)

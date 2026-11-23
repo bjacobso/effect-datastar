@@ -3,7 +3,7 @@
  * (87 users, 5 teams, every 6th user without a team).
  */
 import { describe, expect, it } from "vitest"
-import { makeApp, rowNames, userDraft, usersQuery, type Event } from "./support.ts"
+import { decode, initialSignals, makeApp, rowNames, userDraft, usersQuery, type Event } from "./support.ts"
 
 const app = makeApp()
 
@@ -26,14 +26,12 @@ const view = async (q: ReturnType<typeof usersQuery>, firstDone = hasTable) => {
   return { ...s, first, next: () => s.until(hasTable) }
 }
 
-const decodeEntities = (s: string) => s.replace(/&#34;/g, '"').replace(/&quot;/g, '"').replace(/&amp;/g, "&")
-const initialSignals = (html: string) => JSON.parse(decodeEntities(/data-signals="([^"]*)"/.exec(html)![1]!))
 
 describe("pages", () => {
   it("server-renders the first page with team names and options", async () => {
     const html = await app.page("/users")
     expect(html).toContain("<!doctype html>")
-    expect(html).toContain(`data-init="@get('/users/view'`)
+    expect(decode(html)).toContain(`data-init="@get('/users/view'`)
     expect(total(html)).toBe(87)
     expect(rowNames(html)).toHaveLength(10)
     expect(html).toContain(`<option value="2">Growth</option>`)

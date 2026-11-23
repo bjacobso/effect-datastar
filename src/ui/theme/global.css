@@ -1,0 +1,70 @@
+/*
+ * From `@dw/ui` (packages/ui/src/theme/global.css). The build bundles it (with the fonts)
+ * into public/build/app.css and appends the StyleX rules after it.
+ *
+ * The only global stylesheet. Components are styled with StyleX; this declares the ui-sdk cascade
+ * layer first (so app styles win over it), loads the self-hosted fonts and sets a tiny reset that
+ * reads the `--dw-*` tokens from tokens.stylex.ts.
+ */
+@layer ui-sdk;
+
+@import "@fontsource-variable/inter/wght.css";
+@import "@fontsource/allura/400.css";
+
+@layer ui-sdk {
+  :where([data-slot][hidden]:not([hidden="until-found"])) {
+    display: none !important;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: var(--dw-scheme);
+  -webkit-text-size-adjust: 100%;
+  background: var(--dw-bg);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: var(--dw-font-sans);
+  font-size: var(--dw-text-md);
+  line-height: var(--dw-leading);
+  color: var(--dw-text);
+  background: var(--dw-bg);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "cv11", "ss01";
+}
+
+:where(h1, h2, h3, p, ol, ul, dl, dd, figure, blockquote, fieldset) {
+  margin: 0;
+  padding: 0;
+}
+
+:where(ol, ul) {
+  list-style: none;
+}
+
+:where(fieldset) {
+  border: 0;
+  min-width: 0;
+}
+
+:where(button, input, select, textarea) {
+  font: inherit;
+  color: inherit;
+}
+
+:where(a) {
+  color: var(--dw-accent-text);
+}
+
+:where(code) {
+  font-family: var(--dw-font-mono);
+  font-size: 0.9em;
+}

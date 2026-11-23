@@ -16,10 +16,10 @@ describe("SSE encoding", () => {
       )
     }))
 
-  it.effect("patch-elements: selector, mode and async HTML", () =>
+  it.effect("patch-elements: selector and mode", () =>
     Effect.gen(function*() {
       const out = yield* Datastar.encodeEvent(
-        Datastar.patchElements(Promise.resolve("<p>x</p>"), { selector: "#t", mode: "replace" })
+        Datastar.patchElements("<p>x</p>", { selector: "#t", mode: "replace" })
       )
       expect(out).toBe("event: datastar-patch-elements\ndata: selector #t\ndata: mode replace\ndata: elements <p>x</p>\n\n")
     }))

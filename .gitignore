@@ -1,3 +1,6 @@
 node_modules
 *.db
 *.db-*
+# Build output: the server bundle, and the client bundle + CSS served from public/
+dist
+public/build

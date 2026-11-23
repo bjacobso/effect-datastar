@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest"
 import * as Repo from "../src/crud/Repo.ts"
 import { sqlLog } from "./sqlCounter.ts"
-import { type Event, makeApp, rowNames, userDraft, usersQuery } from "./support.ts"
+import { decode, type Event, makeApp, rowNames, userDraft, usersQuery } from "./support.ts"
 
 const app = makeApp()
 
@@ -64,7 +64,7 @@ describe("Repo.plan", () => {
 describe("users live view, per change", () => {
   it("patches only the row when a visible user is renamed", async () => {
     const s = await open(usersQuery())
-    expect(s.first).toContain(`<tr id="users-87">`)
+    expect(s.first).toContain(`<tr id="users-87"`)
     sqlLog.reset()
     await save(87, { name: "Renamed Live" })
     const events = await s.until(hasAny)
@@ -75,13 +75,13 @@ describe("users live view, per change", () => {
     const [row, ...others] = rowPatches(events)
     expect(others).toEqual([])
     expect(patches(events)).toHaveLength(1)
-    expect(row!.elements).toMatch(/^<tr id="users-87"><td>(<span>|<a [^>]*>)?Renamed Live</)
+    expect(row!.elements).toMatch(/^<tr id="users-87"[^>]*><td[^>]*>(<span[^>]*>|<a [^>]*>)?Renamed Live</)
     // Patched by its id (default `outer` mode, no selector).
     expect(row!.selector).toBeUndefined()
     expect(row!.mode).toBeUndefined()
     // Team label and actions are rendered like in the full table.
     expect(row!.elements).toContain("Design")
-    expect(row!.elements).toContain("@delete('/users/87'")
+    expect(decode(row!.elements)).toContain("@delete('/users/87'")
     // No page query, no COUNT: just the row.
     expect(statements.filter((q) => /COUNT\(\*\)/.test(q))).toEqual([])
   })
@@ -100,18 +100,18 @@ describe("users live view, per change", () => {
   it("re-renders the table when a filtered column changes, moving a row out", async () => {
     const s = await open(usersQuery({}, { role: "member" }))
     const before = total(s.first)
-    const target = Number(/<tr id="users-(\d+)">/.exec(s.first)![1])
+    const target = Number(/<tr id="users-(\d+)"/.exec(s.first)![1])
     await save(target, { role: "guest" })
     const events = await s.until(isTable)
     await s.close()
     expect(total(tablePatch(events)!.elements)).toBe(before - 1)
-    expect(tablePatch(events)!.elements).not.toContain(`<tr id="users-${target}">`)
+    expect(tablePatch(events)!.elements).not.toContain(`<tr id="users-${target}"`)
   })
 
   it("re-renders the table when an off-page row moves into the filter", async () => {
     const s = await open(usersQuery({}, { role: "admin" }))
     const before = total(s.first)
-    expect(s.first).not.toContain(`<tr id="users-2">`)
+    expect(s.first).not.toContain(`<tr id="users-2"`)
     expect((await draftOf(2)).role).not.toBe("admin")
     await save(2, { role: "admin" })
     const events = await s.until(isTable)
@@ -121,7 +121,7 @@ describe("users live view, per change", () => {
 
   it("skips updates to off-page rows that can't enter the page", async () => {
     const s = await open(usersQuery())
-    expect(s.first).not.toContain(`<tr id="users-3">`)
+    expect(s.first).not.toContain(`<tr id="users-3"`)
     await save(3, { name: "Not Shown", active: false })
     const events = await s.collect(200)
     await s.close()
@@ -151,12 +151,12 @@ describe("users live view, per change", () => {
   it("re-renders the table, with the new count, on delete", async () => {
     const s = await open(usersQuery({ page: 9 }))
     const before = total(s.first)
-    const target = Number(/<tr id="users-(\d+)">/.exec(s.first)![1])
+    const target = Number(/<tr id="users-(\d+)"/.exec(s.first)![1])
     await app.action("DELETE", `/users/${target}`)
     const events = await s.until(isTable)
     await s.close()
     expect(total(tablePatch(events)!.elements)).toBe(before - 1)
-    expect(tablePatch(events)!.elements).not.toContain(`<tr id="users-${target}">`)
+    expect(tablePatch(events)!.elements).not.toContain(`<tr id="users-${target}"`)
   })
 
   it("re-renders users streams when a related team is renamed", async () => {
