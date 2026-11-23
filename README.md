@@ -52,6 +52,7 @@ That gives the page (server-rendered for the query in the URL), a live table, fi
   - `Field.ts`, `Form.ts`: field metadata, form drafts (with input coercion) and per-field errors
   - `components.tsx`: generic filter bar, sortable table, pagination, form fields and dialog (`@kitajs/html`)
   - `Feedback.tsx`: toast and unexpected-error patches
+- `src/reactivity/`: `Reactivity` across processes (`Broadcast`, `DistributedReactivity`, `SqliteBroadcast`)
 - `src/app/`: the `users` and `teams` resources, migrations (`Db.ts`) and app composition (`App.tsx`)
 - `test/`: unit, in-process HTTP, and browser (`test/e2e`) tests
 
@@ -64,6 +65,35 @@ browser re-issues the request and Datastar cancels the previous stream.
 
 The users view listens to both `users` and `teams`, so renaming or adding a team
 updates the team column and the team selects in every open users tab.
+
+### Across server processes
+
+`Reactivity` is process-local, so `Infra` provides a wrapped one
+(`src/reactivity/`). Several servers on the same SQLite file then update each
+other's tabs, with no change to the resource code:
+
+```ts
+Layer.mergeAll(Users.layer, Teams.layer).pipe(
+  Layer.provideMerge(DistributedReactivity.layer),   // Reactivity
+  Layer.provide(SqliteBroadcast.layer({ pollInterval })), // Broadcast
+  Layer.provideMerge(Db.layer(db))                   // SqlClient
+)
+```
+
+- `Broadcast` is the transport: `publish` a batch of invalidations, `subscribe`
+  to what is published from then on.
+- `DistributedReactivity` invalidates locally as before, queues the keys for a
+  background publisher, and applies other processes' invalidations locally.
+  Each process tags its messages with a random origin and skips its own.
+- `SqliteBroadcast` appends to a `reactivity_invalidations` table and polls it
+  with an id cursor, starting at the current end (no replay). A poll is one
+  `PRAGMA data_version` unless another connection has committed. Rows older
+  than a minute are pruned. The poll interval defaults to 100 ms
+  (`INVALIDATION_POLL_INTERVAL="50 millis"` or `Infra({ pollInterval })`).
+
+```sh
+PORT=3000 npm start & PORT=3001 npm start   # same app.db; edit in one, watch the other
+```
 
 ## URL state
 
