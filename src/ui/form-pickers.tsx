@@ -2,8 +2,14 @@
  * ui-sdk Select, from `@dw/ui` (packages/ui/src/form-pickers.tsx).
  *
  * Adapted: `invalid` (danger border), `emptyLabel` for an explicit "nothing" option, and no
- * lazy loading (the islands bundle is one file). It needs the browser, so it is used
- * from islands; the server renders it once as the island's placeholder.
+ * lazy wrappers in form.tsx: the islands bundle loads each island's module on demand
+ * instead (islands/registry.ts). The other pickers are copied into modules of their own,
+ * so a page loads only the ones it uses: `MultiComboField` (form-combobox.tsx, from
+ * `ComboField`) and `DateField` (form-date.tsx). Not copied: `SuggestInput`,
+ * `DateTimeField`.
+ *
+ * It needs the browser, so it is used from islands; the server renders it once as the
+ * island's placeholder.
  */
 import * as stylex from "@stylexjs/stylex"
 import { Select, SelectContent, SelectItem, SelectItemIndicator, SelectTrigger, SelectValue } from "@ui-sdk/react/select"
@@ -75,3 +81,4 @@ export function SelectField({
     </Select>
   )
 }
+

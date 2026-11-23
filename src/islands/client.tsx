@@ -11,9 +11,30 @@ import type { ReactNode } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import { syncTheme } from "../ui/theme/themes.ts"
 import { type Host, type Island, TAG } from "./Island.tsx"
-import { all } from "./islands.tsx"
+import { eager, loaders } from "./registry.ts"
 
-const registry = new Map<string, Island<never>>(all.map((island) => [island.name, island]))
+/** Loaded islands, and the loads in flight (each module is imported once). */
+const loaded = new Map<string, Island<never>>(eager.map((island) => [island.name, island]))
+const loading = new Map<string, Promise<Island<never> | undefined>>()
+
+const load = (name: string): Promise<Island<never> | undefined> => {
+  let pending = loading.get(name)
+  if (!pending) {
+    const loader = loaders[name]
+    pending = loader === undefined
+      ? Promise.resolve(undefined)
+      : loader().then((island) => {
+        loaded.set(name, island)
+        return island
+      }, (error: unknown) => {
+        console.error(`Could not load island "${name}"`, error)
+        loading.delete(name)
+        return undefined
+      })
+    loading.set(name, pending)
+  }
+  return pending
+}
 
 class IslandElement extends HTMLElement {
   #value: unknown = ""
@@ -79,9 +100,14 @@ class IslandElement extends HTMLElement {
   #render() {
     if (!this.#root) return
     const name = this.getAttribute("name") ?? ""
-    const island = registry.get(name)
+    const island = loaded.get(name)
     if (!island) {
-      console.error(`Unknown island "${name}"`, this)
+      // First use of this island: load its module, then render. The server-rendered
+      // placeholder stays until then. Datastar can already bind the host (`value`).
+      void load(name).then((found) => {
+        if (found) this.#render()
+        else console.error(`Unknown island "${name}"`, this)
+      })
       return
     }
     let props: unknown
