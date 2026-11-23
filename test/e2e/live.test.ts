@@ -82,10 +82,12 @@ describe("users page", () => {
       "Enter a valid email",
       "",
       "",
+      "",
+      "",
       ""
     ])
 
-    await dialog(page).locator("input[type=text]").fill("E2E Person")
+    await dialog(page).locator(`input[id$="-field-name"]`).fill("E2E Person")
     await dialog(page).locator("input[type=email]").fill("e2e@example.com")
     await pickTeam(page, "Design")
     await save(page)
@@ -99,7 +101,7 @@ describe("users page", () => {
     await page.locator("tbody button", { hasText: "Edit" }).click()
     await expect.poll(() => dialog(page).count()).toBe(1)
     await expect.poll(() => teamTrigger(page).innerText()).toBe("Design")
-    await dialog(page).locator("input[type=text]").fill("E2E Edited")
+    await dialog(page).locator(`input[id$="-field-name"]`).fill("E2E Edited")
     await save(page)
     await expect.poll(() => firstColumn(page)).toEqual(["E2E Edited"])
 
@@ -171,7 +173,7 @@ describe("team select island", () => {
     await expect.poll(() => teamTrigger(users).innerText()).toBe("Platform")
 
     await teams.locator("tbody tr", { hasText: "Platform" }).locator("button", { hasText: "Edit" }).click()
-    await dialog(teams).locator("input[type=text]").fill("Platform Core")
+    await dialog(teams).locator(`input[id$="-field-name"]`).fill("Platform Core")
     await save(teams)
 
     // The server re-sent the select: same value, new label, new options.
@@ -222,7 +224,7 @@ describe("live updates across tabs", () => {
     await expect.poll(() => total(users).innerText()).toBe("15 total")
 
     await teams.locator("tbody tr", { hasText: "Growth" }).locator("button", { hasText: "Edit" }).click()
-    await dialog(teams).locator("input[type=text]").fill("Growth Eng")
+    await dialog(teams).locator(`input[id$="-field-name"]`).fill("Growth Eng")
     await save(teams)
 
     await expect.poll(() => teamColumn(users).innerText()).toBe("Growth Eng")
@@ -247,7 +249,7 @@ describe("live updates across tabs", () => {
 
     await row(editor).locator("button", { hasText: "Edit" }).click()
     await expect.poll(() => dialog(editor).count()).toBe(1)
-    await dialog(editor).locator("input[type=text]").fill("Row Patched")
+    await dialog(editor).locator(`input[id$="-field-name"]`).fill("Row Patched")
     await save(editor)
 
     await expect.poll(() => row(viewer).locator("td").first().innerText()).toBe("Row Patched")
@@ -280,9 +282,10 @@ describe("team detail page", () => {
 
     // Create from the embedded table: the new member lands in this team.
     await detail.locator("#members-section").getByRole("button", { name: "New user" }).click()
-    expect(await detail.locator("#members-dialog select").count()).toBe(1) // role only, no team
-    expect(await detail.locator("#members-dialog ds-island").count()).toBe(0) // no team select island
-    await dialog(detail).locator("input[type=text]").fill("Embedded Person")
+    // Role, start date and tags islands; no team select (the team is locked).
+    expect(await detail.locator(`#members-dialog ds-island[id="members-field-role"]`).count()).toBe(1)
+    expect(await detail.locator(`#members-dialog [id$="-field-teamId"]`).count()).toBe(0)
+    await dialog(detail).locator(`input[id$="-field-name"]`).fill("Embedded Person")
     await dialog(detail).locator("input[type=email]").fill("embedded@example.com")
     await save(detail)
     await expect.poll(() => detail.locator("#toast").innerText()).toBe("Created Embedded Person")
@@ -296,7 +299,7 @@ describe("team detail page", () => {
     // Rename the team from the teams page: the detail page and the users tab follow.
     const teams = await open("/teams")
     await teams.locator("tbody tr", { hasText: "Support" }).locator("button", { hasText: "Edit" }).click()
-    await dialog(teams).locator("input[type=text]").fill("Support Ops")
+    await dialog(teams).locator(`input[id$="-field-name"]`).fill("Support Ops")
     await save(teams)
     await expect.poll(() => detail.locator("#teams-record h1").innerText()).toBe("Support Ops")
     await expect.poll(() => teamColumn(users).innerText()).toBe("Support Ops")
@@ -308,7 +311,7 @@ describe("team detail page", () => {
   it("edits the record in place, follows a rename from another tab, and deletes back to the list", async () => {
     const teams = await open("/teams")
     await teams.getByRole("button", { name: "New team" }).click()
-    await dialog(teams).locator("input[type=text]").fill("Detail Team")
+    await dialog(teams).locator(`input[id$="-field-name"]`).fill("Detail Team")
     await save(teams)
     const taken = await teams.locator("tbody a").filter({ hasNotText: "Detail" }).first().innerText()
     await teams.locator("tbody a", { hasText: "Detail Team" }).click()
@@ -319,11 +322,11 @@ describe("team detail page", () => {
 
     // Edit: the same dialog and validation as the list.
     await detail.locator("#teams-record").getByRole("button", { name: "Edit" }).click()
-    await expect.poll(() => dialog(detail).locator("input[type=text]").inputValue()).toBe("Detail Team")
-    await dialog(detail).locator("input[type=text]").fill(taken)
+    await expect.poll(() => dialog(detail).locator(`input[id$="-field-name"]`).inputValue()).toBe("Detail Team")
+    await dialog(detail).locator(`input[id$="-field-name"]`).fill(taken)
     await dialog(detail).locator("button[type=submit]").click()
     await expect.poll(() => dialog(detail).innerText()).toContain("A team with that name already exists")
-    await dialog(detail).locator("input[type=text]").fill("Detail Edited")
+    await dialog(detail).locator(`input[id$="-field-name"]`).fill("Detail Edited")
     await save(detail)
     await expect.poll(() => heading.innerText()).toBe("Detail Edited")
     await expect.poll(() => detail.locator("#toast").innerText()).toBe("Saved Detail Edited")
@@ -331,7 +334,7 @@ describe("team detail page", () => {
     // A rename in another tab shows up here.
     const other = await open("/teams?name=Detail")
     await other.locator("tbody button", { hasText: "Edit" }).click()
-    await dialog(other).locator("input[type=text]").fill("Detail Remote")
+    await dialog(other).locator(`input[id$="-field-name"]`).fill("Detail Remote")
     await save(other)
     await expect.poll(() => heading.innerText()).toBe("Detail Remote")
 

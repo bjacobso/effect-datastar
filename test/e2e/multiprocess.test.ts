@@ -56,7 +56,7 @@ describe("live updates across server processes", () => {
     await expect.poll(() => total(onB).innerText()).toBe("87 total")
 
     await onA.getByRole("button", { name: "New user" }).click()
-    await dialog(onA).locator("input[type=text]").fill("Cross Process")
+    await dialog(onA).locator(`input[id$="-field-name"]`).fill("Cross Process")
     await dialog(onA).locator("input[type=email]").fill("cross@example.com")
     const submitted = Date.now()
     await dialog(onA).locator("button[type=submit]").click()
@@ -79,7 +79,7 @@ describe("live updates across server processes", () => {
     await expect.poll(() => users.locator("tbody tr td:nth-child(4)").first().innerText()).toBe("Design")
 
     await teams.locator("tbody tr", { hasText: "Design" }).locator("button", { hasText: "Edit" }).click()
-    await dialog(teams).locator("input[type=text]").fill("Design Systems")
+    await dialog(teams).locator(`input[id$="-field-name"]`).fill("Design Systems")
     const submitted = Date.now()
     await dialog(teams).locator("button[type=submit]").click()
 
@@ -102,7 +102,7 @@ describe("live updates across server processes", () => {
     const teamsOnB = await open(b, "/teams")
 
     await teamsOnB.getByRole("button", { name: "New team" }).click()
-    await dialog(teamsOnB).locator("input[type=text]").fill("Research")
+    await dialog(teamsOnB).locator(`input[id$="-field-name"]`).fill("Research")
     await dialog(teamsOnB).locator("button[type=submit]").click()
     await expect.poll(() => teamsOnA.locator("tbody tr", { hasText: "Research" }).count()).toBe(1)
 

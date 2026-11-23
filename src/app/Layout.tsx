@@ -6,7 +6,7 @@ import { Logo } from "../ui/icons.tsx"
 import { themeScript } from "../ui/theme/themes.ts"
 import { color, font, radius, size, space } from "../ui/theme/tokens.stylex.ts"
 
-const links = [["/users", "Users"], ["/teams", "Teams"]] as const
+const links = [["/users", "Users"], ["/teams", "Teams"], ["/tags", "Tags"]] as const
 
 export const Layout = (props: { readonly title: string; readonly active: string; readonly children: ReactNode }) => (
   <html lang="en">

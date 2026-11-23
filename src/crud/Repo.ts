@@ -11,9 +11,13 @@
  *   - an update that touches none of the query's sort or active filter columns
  *     can't change which rows are on the page, their order, or the total. If
  *     the row is on the page, only that row is re-fetched; otherwise nothing is.
+ *   - an insert or update in a `dependsOn` table (a related team or tag: a
+ *     rename, a new option) can't change this page's rows either: the stream
+ *     hands back the page it has (`Related`) to re-render with fresh labels.
  *   - anything else (insert, delete, an update to a sorted or filtered column,
- *     a dependency changing, or a bare `Reactivity.invalidate(["users"])` that
- *     didn't come from this repo) re-runs the full page query.
+ *     a delete in a dependency, which may cascade, or a bare
+ *     `Reactivity.invalidate(["users"])` that didn't come from a repo)
+ *     re-runs the full page query.
  *
  * The `Change` travels as the invalidation's payload (`InvalidationPayload`),
  * JSON-encoded: `{ table: "users", change: { _tag: "Update", id: 42, columns:
@@ -21,14 +25,20 @@
  * them, so a change made by another server process (through
  * `DistributedReactivity`) is handled exactly like a local one. No payload, or
  * one that doesn't decode, means "unknown change": a full re-query.
+ *
+ * Many-to-many fields (`ManyToMany.Ids`) are read with each row and written in
+ * the row's transaction; a change to one is reported as a change to that
+ * column of the row, so it is a row patch like any other column.
  */
-import { type Cause, Effect, Option, Queue, Schema, Stream } from "effect"
+import { Cause, Effect, Option, Queue, Schema, Stream } from "effect"
 import type * as Arr from "effect/Array"
 import { Reactivity } from "effect/reactivity"
 import * as Payload from "../reactivity/Payload.ts"
 import type { Model } from "effect/schema"
 import { SqlClient, SqlModel } from "effect/sql"
 import type { SqlError } from "effect/sql"
+import * as Field from "./Field.ts"
+import * as ManyToMany from "./ManyToMany.ts"
 import type { ListQuery, QueryDef } from "./Query.ts"
 
 export interface Page<A> {
@@ -50,8 +60,15 @@ export type Signal<Id> =
   | { readonly _tag: "Change"; readonly change: Change<Id> }
   /** The table key was invalidated without a `Change` (outside this repo, or batched). */
   | { readonly _tag: "Table" }
-  /** One of the stream's `dependsOn` keys was invalidated. */
-  | { readonly _tag: "Dependency" }
+  /**
+   * One of the stream's `dependsOn` keys was invalidated: by that table's repo
+   * (`table` and `change`), or by someone else (neither).
+   */
+  | {
+    readonly _tag: "Dependency"
+    readonly table?: string | undefined
+    readonly change?: Change<unknown> | undefined
+  }
 
 /** What a live stream emits. */
 export type LiveEvent<A> =
@@ -59,10 +76,17 @@ export type LiveEvent<A> =
   | { readonly _tag: "Page"; readonly page: Page<A>; readonly reason: "initial" | "table" | "dependency" }
   /** Rows on the current page whose content changed; membership, order and total did not. */
   | { readonly _tag: "Rows"; readonly rows: Arr.NonEmptyReadonlyArray<A> }
+  /**
+   * Rows of these `dependsOn` tables were inserted or updated, which can't change
+   * this page's rows: the current page (with any of its own rows that changed
+   * re-fetched), to re-render with the related tables' fresh labels.
+   */
+  | { readonly _tag: "Related"; readonly tables: Arr.NonEmptyReadonlyArray<string>; readonly page: Page<A> }
 
 export type Plan<Id> =
   | { readonly _tag: "Requery"; readonly reason: "table" | "dependency" }
   | { readonly _tag: "Rows"; readonly ids: Arr.NonEmptyReadonlyArray<Id> }
+  | { readonly _tag: "Related"; readonly tables: Arr.NonEmptyReadonlyArray<string>; readonly ids: ReadonlyArray<Id> }
   | { readonly _tag: "Skip" }
 
 /**
@@ -74,9 +98,18 @@ export const plan = <Id>(
   visible: ReadonlySet<Id>,
   queryColumns: ReadonlySet<string>
 ): Plan<Id> => {
-  if (signals.some((s) => s._tag === "Dependency")) return { _tag: "Requery", reason: "dependency" }
+  const related = new Set<string>()
+  for (const signal of signals) {
+    if (signal._tag !== "Dependency") continue
+    // Unknown, or a delete (which may cascade to this table's rows).
+    if (signal.table === undefined || signal.change === undefined || signal.change._tag === "Delete") {
+      return { _tag: "Requery", reason: "dependency" }
+    }
+    related.add(signal.table)
+  }
   const ids = new Set<Id>()
   for (const signal of signals) {
+    if (signal._tag === "Dependency") continue
     if (signal._tag !== "Change") return { _tag: "Requery", reason: "table" }
     const change = signal.change
     if (change._tag !== "Update") return { _tag: "Requery", reason: "table" }
@@ -84,6 +117,8 @@ export const plan = <Id>(
     // Membership and order are unchanged, so a row that isn't visible stays invisible.
     if (change.columns.length > 0 && visible.has(change.id)) ids.add(change.id)
   }
+  const [table, ...tables] = related
+  if (table !== undefined) return { _tag: "Related", tables: [table, ...tables], ids: [...ids] }
   const [first, ...rest] = ids
   return first === undefined ? { _tag: "Skip" } : { _tag: "Rows", ids: [first, ...rest] }
 }
@@ -97,7 +132,7 @@ export interface Repo<S extends Model.Any, Id extends keyof S["fields"], Sortabl
   /**
    * The page for `q`, then an update per change: a re-queried page, or just the
    * rows whose content changed. Also re-queries when any `dependsOn` key (e.g.
-   * a related table) is invalidated.
+   * a related table) is invalidated without a change it can tell is harmless.
    */
   readonly live: (
     q: ListQuery<Sortable, FK>,
@@ -109,6 +144,17 @@ export interface Repo<S extends Model.Any, Id extends keyof S["fields"], Sortabl
 }
 
 const sameValue = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b)
+
+/** Any repo's change payload, for the streams that depend on its table (the ids stay encoded). */
+const AnyChangeJson = Schema.Struct({
+  table: Schema.String,
+  change: Schema.Union([
+    Schema.TaggedStruct("Insert", { id: Schema.Json }),
+    Schema.TaggedStruct("Update", { id: Schema.Json, columns: Schema.Array(Schema.String) }),
+    Schema.TaggedStruct("Delete", { id: Schema.Json })
+  ])
+})
+const decodeAnyChange = Schema.decodeUnknownOption(AnyChangeJson)
 
 export const make = <
   S extends Model.Any & Schema.Codec<any, any, never, never>,
@@ -135,17 +181,28 @@ export const make = <
     const idOf = (row: Row): RowId => row[options.idColumn]
     const columns = Object.keys(model.fields)
 
+    // --- many-to-many fields ---------------------------------------------------
+    // Read with every row (a correlated subquery per field, in the same
+    // statement), so rows always carry them.
+
+    const links = Field.links(model.fields)
+    const selectRows = links.length === 0
+      ? sql`SELECT * FROM ${table}`
+      : sql`SELECT ${table}.*, ${sql.csv(links.map((l) => ManyToMany.select(sql, l, options.table, options.idColumn)))} FROM ${table}`
+    const decode = (rows: ReadonlyArray<object>) =>
+      decodeRows(ManyToMany.parse(links, rows as ReadonlyArray<Record<string, unknown>>))
+
     const list = (q: ListQuery<Sortable, FK>): Effect.Effect<Page<Row>, SqlError.SqlError | Schema.SchemaError> =>
       Effect.gen(function*() {
-        const where = options.query.where(sql, q)
+        const where = options.query.where(sql, q, options.idColumn)
         const [rows, counted] = yield* Effect.all([
-          sql`SELECT * FROM ${table} ${where} ${options.query.orderBy(sql, q, options.idColumn)}
+          sql`${selectRows} ${where} ${options.query.orderBy(sql, q, options.idColumn)}
               LIMIT ${q.pageSize} OFFSET ${(q.page - 1) * q.pageSize}`,
           sql<{ total: number }>`SELECT COUNT(*) AS total FROM ${table} ${where}`
         ], { concurrency: "unbounded" })
         const total = counted[0]?.total ?? 0
         return {
-          rows: yield* decodeRows(rows),
+          rows: yield* decode(rows),
           total,
           page: q.page,
           pages: Math.max(1, Math.ceil(total / q.pageSize))
@@ -153,10 +210,62 @@ export const make = <
       }).pipe(Effect.withSpan(`${options.table}.list`))
 
     const findByIds = (ids: ReadonlyArray<RowId>) =>
-      sql`SELECT * FROM ${table} WHERE ${sql.in(options.idColumn, ids)}`.pipe(
-        Effect.flatMap(decodeRows),
+      sql`${selectRows} WHERE ${sql.in(options.idColumn, ids)}`.pipe(
+        Effect.flatMap(decode),
         Effect.withSpan(`${options.table}.findByIds`)
       )
+
+    const findById = (id: RowId): Effect.Effect<Row, Cause.NoSuchElementError | Schema.SchemaError | SqlError.SqlError> =>
+      links.length === 0
+        // The model needs no services (see `make`'s constraint), which TS can't see through the generic.
+        ? base.findById(id) as Effect.Effect<Row, Cause.NoSuchElementError | Schema.SchemaError | SqlError.SqlError>
+        : Effect.flatMap(
+          sql`${selectRows} WHERE ${sql(options.idColumn)} = ${id}`.pipe(Effect.flatMap(decode)),
+          (rows) => rows[0] === undefined ? Effect.fail(new Cause.NoSuchElementError()) : Effect.succeed(rows[0])
+        )
+
+    /**
+     * Insert or update a row with many-to-many fields: the row, then its join
+     * rows (callers run it in a transaction). Both are written from the
+     * variant's encoded value, with the link fields split off. `before` is the
+     * row's current version when the caller read it in the same transaction:
+     * its ids are what the join table holds, so they needn't be read again.
+     */
+    const encodeInsert = Schema.encodeUnknownEffect(model.insert as Schema.Codec<unknown, unknown>)
+    const encodeUpdate = Schema.encodeUnknownEffect(model.update as Schema.Codec<unknown, unknown>)
+    const split = (encoded: unknown) => {
+      const row: Record<string, unknown> = { ...(encoded as Record<string, unknown>) }
+      const linked = links.map((l) => {
+        const ids = (row[l.key] ?? []) as ReadonlyArray<unknown>
+        delete row[l.key]
+        return [l, ids] as const
+      })
+      return { row, linked }
+    }
+    const writeLinked = (
+      encoded: unknown,
+      mode: { readonly fresh: true } | { readonly fresh: false; readonly before: Row | undefined }
+    ) =>
+      Effect.gen(function*() {
+        const { row, linked } = split(encoded)
+        const id = row[options.idColumn]
+        const written = mode.fresh
+          ? yield* sql`INSERT INTO ${table} ${sql.insert(row as Record<string, never>).returning("*")}`
+          : yield* sql`UPDATE ${table} SET ${sql.update(row as Record<string, never>, [options.idColumn])}
+                        WHERE ${sql(options.idColumn)} = ${id as never} RETURNING *`
+        const saved = written[0] as Record<string, unknown> | undefined
+        // As `makeRepository`: the row was there a moment ago (callers check first).
+        if (saved === undefined) return yield* Effect.die(new Cause.NoSuchElementError(`${options.table}: no row ${String(id)}`))
+        const previous = mode.fresh || mode.before === undefined
+          ? undefined
+          : (yield* encodeRow(mode.before)) as Record<string, ReadonlyArray<unknown>>
+        for (const [link, ids] of linked) {
+          yield* ManyToMany.write(sql, link, saved[options.idColumn], ids, mode.fresh ? [] : previous?.[link.key])
+          saved[link.key] = JSON.stringify(ManyToMany.canonical(ids))
+        }
+        const [decoded] = yield* decode([saved])
+        return decoded as Row
+      })
 
     // --- changes -------------------------------------------------------------
     // Reactivity handlers take no arguments, so the change rides along as the
@@ -195,6 +304,15 @@ export const make = <
       return Option.isSome(decoded) ? { _tag: "Change", change: decoded.value.change } : { _tag: "Table" }
     }
 
+    /** Why a `dependsOn` key was invalidated: another repo's change, if the payload says. */
+    const dependencySignal = (): Signal<RowId> => {
+      const payload = payloads.current()
+      const decoded = payload === undefined ? Option.none() : decodeAnyChange(payload)
+      return Option.isSome(decoded)
+        ? { _tag: "Dependency", table: decoded.value.table, change: decoded.value.change }
+        : { _tag: "Dependency" }
+    }
+
     /** Columns whose stored (encoded) value differs between two versions of a row (all, if unknown). */
     const changedColumns = (before: Row | undefined, after: Row) =>
       Effect.gen(function*() {
@@ -206,7 +324,16 @@ export const make = <
       })
 
     const insert = (value: S["insert"]["Type"]) =>
-      Effect.tap(base.insert(value), (row: Row) => announce({ _tag: "Insert", id: idOf(row) }))
+      Effect.tap(
+        links.length === 0
+          ? base.insert(value)
+          : Effect.flatMap(encodeInsert(value), (encoded) => {
+            const write = writeLinked(encoded, { fresh: true })
+            // A new row without join rows is one statement: no transaction needed.
+            return split(encoded).linked.every(([, ids]) => ids.length === 0) ? write : sql.withTransaction(write)
+          }),
+        (row: Row) => announce({ _tag: "Insert", id: idOf(row) })
+      )
 
     /**
      * Open live streams on this table. Without any, there is nobody to diff
@@ -221,15 +348,25 @@ export const make = <
         // changes still cover every column that changed (if a column differs
         // between its version and ours, it differs from the one we read in at
         // least one of them), and streams act on both.
+        // With many-to-many fields, the row and its join rows are written in one
+        // transaction, and the previous version is read inside it (its ids tell
+        // which join rows to change).
         const id: RowId = value[options.idColumn]
-        const before = watchers === 0 && !payloads.crossProcess
-          ? undefined
-          : yield* base.findById(id).pipe(Effect.catchTag("NoSuchElementError", () => Effect.succeed(undefined)))
-        const after = yield* base.update(value)
+        const readBefore = watchers === 0 && !payloads.crossProcess
+          ? Effect.succeed(undefined)
+          : findById(id).pipe(Effect.catchTag("NoSuchElementError", () => Effect.succeed(undefined)))
+        const [before, after] = links.length === 0
+          ? [yield* readBefore, yield* base.update(value)] as const
+          : yield* sql.withTransaction(Effect.gen(function*() {
+            const encoded = yield* encodeUpdate(value)
+            const before = yield* readBefore
+            return [before, yield* writeLinked(encoded, { fresh: false, before })] as const
+          }))
         yield* announce({ _tag: "Update", id: idOf(after), columns: yield* changedColumns(before, after) })
         return after
       })
 
+    // Join rows go with the row (`ON DELETE CASCADE`).
     const remove = (id: RowId) => Effect.tap(base.delete(id), () => announce({ _tag: "Delete", id }))
 
     // --- live ----------------------------------------------------------------
@@ -246,7 +383,7 @@ export const make = <
         // Registered before the first query, so no change can slip in between.
         yield* register([options.table], tableSignal)
         const dependsOn = liveOptions?.dependsOn ?? []
-        if (dependsOn.length > 0) yield* register(dependsOn, () => ({ _tag: "Dependency" }))
+        if (dependsOn.length > 0) yield* register(dependsOn, dependencySignal)
 
         const queryColumns = new Set(options.query.columns(q))
         let current: Page<Row> | undefined
@@ -255,6 +392,15 @@ export const make = <
           Effect.map(list(q), (page): ReadonlyArray<LiveEvent<Row>> => {
             current = page
             return [{ _tag: "Page", page, reason }]
+          })
+
+        /** Re-fetches rows of the current page; `undefined` if one vanished (deleted meanwhile). */
+        const refetch = (ids: ReadonlyArray<RowId>) =>
+          Effect.map(findByIds(ids), (fetched) => {
+            if (fetched.length !== ids.length) return undefined
+            const byId = new Map(fetched.map((row) => [idOf(row), row] as const))
+            if (current) current = { ...current, rows: current.rows.map((row) => byId.get(idOf(row)) ?? row) }
+            return fetched
           })
 
         const handle = (batch: ReadonlyArray<Signal<RowId>>) =>
@@ -267,13 +413,15 @@ export const make = <
               case "Requery":
                 return yield* requery(next.reason)
               case "Rows": {
-                const fetched = yield* findByIds(next.ids)
-                const [first, ...rest] = fetched
-                // A row that vanished (deleted meanwhile): the page needs a full re-query.
-                if (first === undefined || fetched.length !== next.ids.length) return yield* requery("table")
-                const byId = new Map(fetched.map((row) => [idOf(row), row] as const))
-                if (current) current = { ...current, rows: current.rows.map((row) => byId.get(idOf(row)) ?? row) }
+                const fetched = yield* refetch(next.ids)
+                const [first, ...rest] = fetched ?? []
+                if (first === undefined) return yield* requery("table")
                 return [{ _tag: "Rows", rows: [first, ...rest] }] as ReadonlyArray<LiveEvent<Row>>
+              }
+              case "Related": {
+                if (next.ids.length > 0 && (yield* refetch(next.ids)) === undefined) return yield* requery("table")
+                if (current === undefined) return yield* requery("dependency")
+                return [{ _tag: "Related", tables: next.tables, page: current }] as ReadonlyArray<LiveEvent<Row>>
               }
             }
           })
@@ -286,6 +434,6 @@ export const make = <
       }))
 
     // The model is constrained to need no services, which TS cannot see through the generic.
-    const repo = { findById: base.findById, list, live, insert, update, delete: remove }
+    const repo = { findById, list, live, insert, update, delete: remove }
     return repo as unknown as Repo<S, Id, Sortable, FK>
   })

@@ -3,7 +3,7 @@
  *
  *   const UserQuery = Query.make(User, {
  *     sortable: ["name", "email", "createdAt"],
- *     filters: { name: "contains", role: "eq", active: "eq" },
+ *     filters: { name: "contains", role: "eq", active: "eq", createdAt: "range", tags: "has" },
  *     defaultSort: ["createdAt", "desc"],
  *     pageSizes: [10, 25, 50]
  *   })
@@ -15,13 +15,31 @@
  *   - `initial` : default query value
  *   - `filters` : per-filter field metadata (label, operator, options) for rendering
  *   - `where` / `orderBy` / `limit` : `effect/sql` fragments
+ *
+ * Operators:
+ *   - `contains`: `LIKE %value%`
+ *   - `eq`: equal to a value of the field (`null` for `IS NULL` on nullable fields)
+ *   - `range`: a date range on a `date` or `datetime` field, as two filters,
+ *     `${key}From` and `${key}To` (ISO dates, both inclusive, either may be blank):
+ *     `?createdAtFrom=2026-01-01&createdAtTo=2026-01-31`
+ *   - `has`: a many-to-many field (`ManyToMany.Ids`) includes an id: `?tags=3`
  */
 import { Schema } from "effect"
 import type { Statement } from "effect/sql"
 import * as Field from "./Field.ts"
+import * as ManyToMany from "./ManyToMany.ts"
+import { isIsoDate, nextDay } from "./Schemas.ts"
 
-export type Operator = "contains" | "eq"
+export type Operator = "contains" | "eq" | "range" | "has"
 export type Dir = "asc" | "desc"
+
+/** The query's filter keys for a filters config: a `range` filter is two, `${key}From` and `${key}To`. */
+export type Keys<Filters> = {
+  [K in keyof Filters & string]: Filters[K] extends "range" ? `${K}From` | `${K}To` : K
+}[keyof Filters & string]
+
+/** The two filter keys of a `range` filter. */
+export const rangeKeys = (key: string) => [`${key}From`, `${key}To`] as const
 
 export interface Config<Sortable extends string, Filters extends Record<string, Operator>> {
   readonly sortable: ReadonlyArray<Sortable>
@@ -51,6 +69,8 @@ export type ListParams<Sortable extends string, FilterKey extends string> =
 
 export interface FilterInfo extends Field.FieldInfo {
   readonly operator: Operator
+  /** Its keys in the query's `filters` (and the URL): `[key]`, or `rangeKeys(key)` for a range. */
+  readonly params: ReadonlyArray<string>
 }
 
 export interface QueryDef<Sortable extends string, FilterKey extends string> {
@@ -59,24 +79,25 @@ export interface QueryDef<Sortable extends string, FilterKey extends string> {
   readonly sortable: ReadonlyArray<Sortable>
   readonly pageSizes: ReadonlyArray<number>
   readonly filters: ReadonlyArray<FilterInfo>
-  readonly where: (sql: SqlHelpers, q: ListQuery<Sortable, FilterKey>) => Statement.Fragment
+  /** `idColumn` is needed for `has` filters (`id IN (SELECT ... FROM the join table)`). */
+  readonly where: (sql: SqlHelpers, q: ListQuery<Sortable, FilterKey>, idColumn: string) => Statement.Fragment
   readonly orderBy: (sql: SqlHelpers, q: ListQuery<Sortable, FilterKey>, idColumn: string) => Statement.Fragment
   /**
    * Columns that decide which rows a query returns and in what order: the sort
-   * column and every active filter. A change to any other column can't move a
-   * row into, out of, or within the results.
+   * column and every active filter (a many-to-many filter counts as its field).
+   * A change to any other column can't move a row into, out of, or within the results.
    */
   readonly columns: (q: ListQuery<Sortable, FilterKey>) => ReadonlyArray<string>
   /**
    * URL search params for a query; values equal to the defaults are omitted.
-   * Filters use their field name (`?role=admin&teamId=3&sort=name`).
+   * Filters use their key (`?role=admin&teamId=3&createdAtFrom=2026-01-01&sort=name`).
    */
   readonly toSearchParams: (q: ListQuery<Sortable, FilterKey>) => URLSearchParams
   /** Query from URL search params. Lenient: invalid or unknown params fall back to defaults. */
   readonly fromSearchParams: (params: URLSearchParams) => ListQuery<Sortable, FilterKey>
   /**
    * The query as flat, optional params with the URL-state names (`page`,
-   * `pageSize`, `sort`, `dir` and one per filter), validated strictly with the
+   * `pageSize`, `sort`, `dir` and one per filter key), validated strictly with the
    * same per-field schemas as the signals. For APIs, where an invalid param
    * should be an error rather than a silent default.
    */
@@ -139,12 +160,23 @@ const isFieldValue = (field: Field.FieldInfo) => {
 /** Schema for the raw filter string, validated against the field's own schema. */
 const filterSchema = (field: Field.FieldInfo, op: Operator): Schema.Codec<string, string> => {
   if (op === "contains") return Schema.String
+  if (op === "range") {
+    return Schema.String.check(
+      Schema.makeFilter((raw: string) => raw === "" || isIsoDate(raw), { message: `Invalid ${field.label} date` })
+    )
+  }
+  if (op === "has") {
+    const valid = isFieldValue(field.element!)
+    return Schema.String.check(
+      Schema.makeFilter((raw: string) => raw === "" || valid(raw), { message: `Invalid ${field.label}` })
+    )
+  }
   const nulls = field.nullable ? [NULL] : []
   switch (field.kind) {
     case "enum":
-      return Schema.Literals(["", ...nulls, ...field.options]) as any
+      return Schema.Literals(["", ...nulls, ...field.options]) as unknown as Schema.Codec<string, string>
     case "boolean":
-      return Schema.Literals(["", ...nulls, "true", "false"]) as any
+      return Schema.Literals(["", ...nulls, "true", "false"]) as unknown as Schema.Codec<string, string>
     default: {
       const valid = isFieldValue(field)
       return Schema.String.check(
@@ -168,12 +200,20 @@ export const make = <
 >(
   model: M,
   config: Config<Sortable, Filters & Record<string, Operator>>
-): QueryDef<Sortable, keyof Filters & string> => {
-  type FK = keyof Filters & string
-  const filters: Array<FilterInfo> = Object.entries(config.filters as Record<string, Operator>).map(([key, operator]) => ({
-    ...Field.info(key, model.fields[key]!),
-    operator
-  }))
+): QueryDef<Sortable, Keys<Filters>> => {
+  type FK = Keys<Filters>
+  const filters: Array<FilterInfo> = Object.entries(config.filters as Record<string, Operator>).map(([key, operator]) => {
+    const info = Field.info(key, model.fields[key]!)
+    if (operator === "range" && info.kind !== "date" && info.kind !== "datetime") {
+      throw new Error(`Query: "${key}" is not a date, so it can't have a range filter`)
+    }
+    if ((operator === "has") !== (info.kind === "ids")) {
+      throw new Error(`Query: "${key}" ${info.kind === "ids" ? "is many-to-many: use has" : "is not many-to-many"}`)
+    }
+    return { ...info, operator, params: operator === "range" ? rangeKeys(key) : [key] }
+  })
+  /** Every filter key of the query, in order. */
+  const paramKeys = filters.flatMap((f) => f.params)
 
   const pieces = {
     page: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
@@ -181,7 +221,9 @@ export const make = <
     sort: Schema.Literals(config.sortable),
     dir: Schema.Literals(["asc", "desc"])
   }
-  const filterSchemas = Object.fromEntries(filters.map((f) => [f.key, filterSchema(f, f.operator)]))
+  const filterSchemas = Object.fromEntries(
+    filters.flatMap((f) => f.params.map((key) => [key, filterSchema(f, f.operator)] as const))
+  )
   const schema = Schema.Struct({
     ...pieces,
     filters: Schema.Struct(filterSchemas)
@@ -199,14 +241,14 @@ export const make = <
     pageSize: config.pageSizes[0],
     sort: config.defaultSort[0],
     dir: config.defaultSort[1],
-    filters: Object.fromEntries(filters.map((f) => [f.key, ""])) as ListQuery<Sortable, FK>["filters"]
+    filters: Object.fromEntries(paramKeys.map((k) => [k, ""])) as ListQuery<Sortable, FK>["filters"]
   }
 
   const toSearchParams = (q: ListQuery<Sortable, FK>) => {
     const params = new URLSearchParams()
-    for (const f of filters) {
-      const v = (q.filters as Record<string, string>)[f.key]
-      if (v) params.set(f.key, v)
+    for (const k of paramKeys) {
+      const v = (q.filters as Record<string, string>)[k]
+      if (v) params.set(k, v)
     }
     if (q.sort !== initial.sort || q.dir !== initial.dir) {
       params.set("sort", q.sort)
@@ -225,7 +267,7 @@ export const make = <
       sort: or(param(pieces.sort, params.get("sort"), false), initial.sort),
       dir: or(param(pieces.dir, params.get("dir"), false), initial.dir),
       filters: Object.fromEntries(
-        filters.map((f) => [f.key, or(param(filterSchemas[f.key]!, params.get(f.key), false), "")])
+        paramKeys.map((k) => [k, or(param(filterSchemas[k]!, params.get(k), false), "")])
       ) as ListQuery<Sortable, FK>["filters"]
     }
   }
@@ -243,7 +285,7 @@ export const make = <
       schema: Schema.Struct({
         ...pieces,
         filters: Schema.Struct({
-          ...Object.fromEntries(rest.map((f) => [f.key, filterSchemas[f.key]!])),
+          ...Object.fromEntries(rest.flatMap((f) => f.params).map((k) => [k, filterSchemas[k]!])),
           [key]: Schema.optionalKey(Schema.Never)
         })
       }) as unknown as Locked<Sortable, FK, L>["schema"],
@@ -270,7 +312,7 @@ export const make = <
       pageSize: Schema.optionalKey(pieces.pageSize),
       sort: Schema.optionalKey(pieces.sort),
       dir: Schema.optionalKey(pieces.dir),
-      ...Object.fromEntries(filters.map((f) => [f.key, Schema.optionalKey(filterSchemas[f.key]!)]))
+      ...Object.fromEntries(paramKeys.map((k) => [k, Schema.optionalKey(filterSchemas[k]!)]))
     }) as unknown as QueryDef<Sortable, FK>["params"],
     fromParams: (p) => ({
       page: p.page ?? initial.page,
@@ -278,30 +320,40 @@ export const make = <
       sort: p.sort ?? initial.sort,
       dir: p.dir ?? initial.dir,
       filters: Object.fromEntries(
-        filters.map((f) => [f.key, (p as Readonly<Record<string, unknown>>)[f.key] ?? ""])
+        paramKeys.map((k) => [k, (p as Readonly<Record<string, unknown>>)[k] ?? ""])
       ) as ListQuery<Sortable, FK>["filters"]
     }),
     sortable: config.sortable,
     pageSizes: config.pageSizes,
     filters,
-    where: (sql, q) => {
+    where: (sql, q, idColumn) => {
       const clauses: Array<Statement.Fragment> = []
+      const value = (key: string) => (q.filters as Record<string, string>)[key] ?? ""
       for (const f of filters) {
-        const raw = (q.filters as Record<string, string>)[f.key]
+        if (f.operator === "range") {
+          // ISO text compares as dates. A datetime's `to` day ends where the next day starts.
+          const [from, to] = f.params.map(value) as [string, string]
+          if (from) clauses.push(sql`${sql(f.key)} >= ${from}`)
+          if (to) clauses.push(f.kind === "datetime" ? sql`${sql(f.key)} < ${nextDay(to)}` : sql`${sql(f.key)} <= ${to}`)
+          continue
+        }
+        const raw = value(f.key)
         if (!raw) continue
         clauses.push(
           f.operator === "contains"
             ? sql`${sql(f.key)} LIKE ${`%${escapeLike(raw)}%`} ESCAPE '\\'`
+            : f.operator === "has"
+            ? ManyToMany.has(sql, f as ManyToMany.Link, idColumn, toDbValue(f.element!, raw))
             : f.nullable && raw === NULL
             ? sql`${sql(f.key)} IS NULL`
-            : sql`${sql(f.key)} = ${toDbValue(f, raw) as any}`
+            : sql`${sql(f.key)} = ${toDbValue(f, raw)}`
         )
       }
       return clauses.length === 0 ? sql.literal("") : sql`WHERE ${sql.and(clauses)}`
     },
     columns: (q) => [
       q.sort,
-      ...filters.filter((f) => (q.filters as Record<string, string>)[f.key] !== "").map((f) => f.key)
+      ...filters.filter((f) => f.params.some((k) => (q.filters as Record<string, string>)[k] !== "")).map((f) => f.key)
     ],
     orderBy: (sql, q, idColumn) => {
       const dir = sql.literal(q.dir === "asc" ? "ASC" : "DESC")

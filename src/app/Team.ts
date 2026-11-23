@@ -10,5 +10,9 @@ export class Team extends Model.Class<Team>("Team")({
     Schema.isMinLength(1, { message: "Name is required" }),
     Schema.isMaxLength(40, { message: "Name is too long" })
   ).annotate({ title: "Name" }),
+  // Long text: a max length of 200 or more makes it a textarea (no widget annotation needed).
+  description: Schema.Trim.check(
+    Schema.isMaxLength(500, { message: "Keep it under 500 characters" })
+  ).annotate({ title: "Description" }),
   createdAt: Model.DateTimeInsert
 }) {}

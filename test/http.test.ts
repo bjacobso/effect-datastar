@@ -76,7 +76,7 @@ describe("users live view", () => {
     expect(rowNames(html)).toHaveLength(10)
     expect(html).toContain("Page 1 of 9")
     const selects = s.first.filter((e) => e.type === "patch-elements" && e.mode === "replace" && e.selector !== "#toast")
-    expect(selects.map((e) => (e as any).selector)).toEqual(["#users-filter-teamId", "#users-field-teamId"])
+    expect(selects.map((e) => (e as any).selector)).toEqual(["#users-filter-teamId", "#users-filter-tags", "#users-field-teamId", "#users-field-tags"])
     expect((selects[0] as any).elements).toContain(">Growth</option>")
   })
 
@@ -135,13 +135,13 @@ describe("users live view", () => {
   it("re-renders team names and selects when a team is renamed", async () => {
     const s = await view(usersQuery({}, { teamId: "2" }))
     expect(table(s.first)).toContain("Growth")
-    await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth Eng" } } })
+    await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth Eng", description: "" } } })
     const next = await s.next()
     await s.close()
     expect(table(next)).toContain("Growth Eng")
     const selects = next.filter((e) => e.type === "patch-elements" && e.mode === "replace")
     expect(selects).toHaveLength(2)
-    await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth" } } })
+    await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth", description: "" } } })
   })
 })
 
@@ -199,12 +199,12 @@ describe("teams", () => {
   })
 
   it("maps a duplicate team name to the name field", async () => {
-    const { events } = await app.action("POST", "/teams", { teams: { draft: { id: "", name: "Design" } } })
+    const { events } = await app.action("POST", "/teams", { teams: { draft: { id: "", name: "Design", description: "" } } })
     expect(signals(events)[0].teams.errors.name).toBe("A team with that name already exists")
   })
 
   it("creates and deletes an empty team", async () => {
-    const created = await app.action("POST", "/teams", { teams: { draft: { id: "", name: "Temp" } } })
+    const created = await app.action("POST", "/teams", { teams: { draft: { id: "", name: "Temp", description: "" } } })
     expect(toasts(created.events)).toEqual(["Created Temp"])
     const removed = await app.action("DELETE", "/teams/6")
     expect(toasts(removed.events)).toEqual(["Deleted"])

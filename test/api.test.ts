@@ -24,6 +24,8 @@ const newUser = (overrides: Record<string, unknown> = {}) => ({
   role: "member",
   teamId: 2,
   active: true,
+  startDate: null,
+  tags: [],
   ...overrides
 })
 
@@ -134,13 +136,13 @@ describe("live views", () => {
 })
 
 describe("OpenAPI", () => {
-  it("serves the spec with both resources", async () => {
+  it("serves the spec with every resource", async () => {
     const { body, status } = await call("GET", "/api/openapi.json")
     expect(status).toBe(200)
-    expect(Object.keys(body.paths).sort()).toEqual(["/api/teams", "/api/teams/{id}", "/api/users", "/api/users/{id}"])
+    expect(Object.keys(body.paths).sort()).toEqual(["/api/tags", "/api/tags/{id}", "/api/teams", "/api/teams/{id}", "/api/users", "/api/users/{id}"])
     const list = body.paths["/api/users"].get
     expect(list.parameters.map((p: { name: string }) => p.name)).toEqual(
-      expect.arrayContaining(["page", "pageSize", "sort", "dir", "name", "email", "role", "teamId", "active"])
+      expect.arrayContaining(["page", "pageSize", "sort", "dir", "name", "email", "role", "teamId", "active", "tags", "createdAtFrom", "createdAtTo"])
     )
     expect(Object.keys(body.paths["/api/users"].post.responses).sort()).toEqual(["201", "400", "409"])
   })

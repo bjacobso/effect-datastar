@@ -59,25 +59,44 @@ describe("SQL statements per mutation", () => {
     await measure("change role (filtered col)", await save(87, { role: "admin" }))
     await measure("insert", () => app.action("POST", "/users", userDraft({ name: "New", email: "new@example.com" })))
     await measure("delete", () => app.action("DELETE", "/users/88"))
-    await measure("rename team", () => app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth Eng" } } }))
+    await measure("rename team", () => app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth Eng", description: "" } } }))
+    await measure("tag a visible user", await save(86, { tags: ["1", "2", "3"] }))
+    await measure("rename tag", () => app.action("PUT", "/tags/1", { tags: { draft: { id: 1, name: "Remote first", color: "#2563eb" } } }))
+    await measure("delete tag", () => app.action("DELETE", "/tags/5"))
 
     await Promise.all(streams.map((s) => s.close()))
     expect(Object.fromEntries(results.map((r) => [r.mutation, r.statements]))).toEqual({
-      // read previous version + update + row re-fetch (page 1) + name-sorted view re-query (2)
-      "rename visible user": 5,
-      // read previous version + update; no view can show the row
-      "toggle active, off-page user": 2,
-      // read previous version + update + row re-fetch (page 1)
-      "change email, visible user": 3,
-      // read previous version + update + row re-fetch (page 1) + role-filtered view re-query (2)
-      "change role (filtered col)": 5,
-      // mutation + page query and COUNT per view
+      // Users have tags (a join table), so a user update is a transaction: BEGIN and COMMIT
+      // around reading the previous version (its tags say which join rows to change) and the
+      // update; the join table is touched only if the tags changed. Rows are read with their
+      // tags in the same statement (a subquery), so reads cost what they did.
+      //
+      // BEGIN + previous version + update + COMMIT + row re-fetch (page 1) + name-sorted view re-query (2)
+      "rename visible user": 7,
+      // BEGIN + previous version + update + COMMIT; no view can show the row
+      "toggle active, off-page user": 4,
+      // BEGIN + previous version + update + COMMIT + row re-fetch (page 1)
+      "change email, visible user": 5,
+      // BEGIN + previous version + update + COMMIT + row re-fetch (page 1) + role-filtered view re-query (2)
+      "change role (filtered col)": 7,
+      // mutation (no tags: no transaction) + page query and COUNT per view
       "insert": 13,
       "delete": 13,
-      // read previous version + update + page query, COUNT and team lookup per view. No teams
-      // view is open here, but the previous version is read anyway: views in other
+      // read previous version + update + the team lookup per view. A renamed team can't change
+      // which users a page shows, so views re-render from the page they have (and send
+      // nothing if it doesn't show the team). Was 20: page query, COUNT and lookup per view.
+      // No teams view is open here, but the previous version is read anyway: views in other
       // processes may need the changed columns (they travel with the broadcast).
-      "rename team": 20
+      "rename team": 8,
+      // Tags changed on one row: a row patch, like any column. BEGIN + previous version +
+      // update + DELETE and INSERT of join rows + COMMIT + a re-fetch of the row in each of the
+      // three views whose page shows user 86. No page query, no COUNT.
+      "tag a visible user": 9,
+      // As a team rename: read previous version + update + the tag lookup per view.
+      "rename tag": 8,
+      // Deleting a tag deletes its join rows (ON DELETE CASCADE), which may change any page:
+      // delete + page query, COUNT and both lookups per view.
+      "delete tag": 25
     })
   })
 })

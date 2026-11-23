@@ -15,6 +15,8 @@ export interface Option {
   readonly label: string
   /** Link to the referenced row's page, when it has one. */
   readonly href?: string | undefined
+  /** The row's color (`#rrggbb`), when the table has a color field: tag chips. */
+  readonly color?: string | undefined
 }
 
 export interface Lookup {
@@ -27,15 +29,23 @@ export const make = (config: {
   readonly value: string
   readonly label: string
   readonly href?: ((value: string) => string) | undefined
+  /** A color column, read along with the label. */
+  readonly color?: string | undefined
 }) =>
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
-    const options = sql<{ value: string | number; label: string }>`
-      SELECT ${sql(config.value)} AS value, ${sql(config.label)} AS label
+    const color = config.color === undefined ? sql.literal("") : sql`, ${sql(config.color)} AS color`
+    const options = sql<{ value: string | number; label: string; color?: string }>`
+      SELECT ${sql(config.value)} AS value, ${sql(config.label)} AS label ${color}
       FROM ${sql(config.table)} ORDER BY ${sql(config.label)}`.pipe(
         Effect.map((rows) => rows.map((r): Option => {
           const value = String(r.value)
-          return config.href ? { value, label: r.label, href: config.href(value) } : { value, label: r.label }
+          return {
+            value,
+            label: r.label,
+            ...(config.href ? { href: config.href(value) } : {}),
+            ...(typeof r.color === "string" ? { color: r.color } : {})
+          }
         }))
       )
     return { table: config.table, options } satisfies Lookup

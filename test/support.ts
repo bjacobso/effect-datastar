@@ -89,15 +89,17 @@ export const makeApp = (options?: {
     const decoder = new TextDecoder()
     let buffer = ""
     let pending: Promise<ReadableStreamReadResult<Uint8Array>> | undefined
-    const read = (ms: number) => {
+    // A read that times out stays pending for the next call, which gets its chunk: it is
+    // only cleared once a caller has received it (clearing it when it resolves would drop
+    // a chunk that arrives between two calls).
+    const read = async (ms: number) => {
       pending ??= reader.read()
-      return Promise.race([
-        pending.then((r) => {
-          pending = undefined
-          return r
-        }),
+      const r = await Promise.race([
+        pending,
         new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), ms))
       ])
+      if (r !== "timeout") pending = undefined
+      return r
     }
     const drain = (): Array<Event> => {
       const end = buffer.lastIndexOf("\n\n") + 2
@@ -161,14 +163,14 @@ export const usersQuery = (overrides: Record<string, unknown> = {}, filters: Rec
       pageSize: 10,
       sort: "createdAt",
       dir: "desc",
-      filters: { name: "", email: "", role: "", teamId: "", active: "", ...filters },
+      filters: { name: "", email: "", role: "", teamId: "", active: "", tags: "", createdAtFrom: "", createdAtTo: "", ...filters },
       ...overrides
     }
   }
 })
 
 export const userDraft = (draft: Record<string, unknown>) => ({
-  users: { draft: { id: "", name: "", email: "", role: "member", teamId: "", active: true, ...draft } }
+  users: { draft: { id: "", name: "", email: "", role: "member", teamId: "", active: true, startDate: "", tags: [], ...draft } }
 })
 
 /** Text of the first cell of each row in a rendered table (rows and cells carry StyleX classes). */

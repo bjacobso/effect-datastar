@@ -24,13 +24,13 @@ const membersQuery = (overrides: Record<string, unknown> = {}, filters: Record<s
       pageSize: 10,
       sort: "createdAt",
       dir: "desc",
-      filters: { name: "", email: "", role: "", active: "", ...filters },
+      filters: { name: "", email: "", role: "", active: "", tags: "", createdAtFrom: "", createdAtTo: "", ...filters },
       ...overrides
     }
   }
 })
 const memberDraft = (draft: Record<string, unknown>) => ({
-  members: { draft: { id: "", name: "", email: "", role: "member", active: true, ...draft } }
+  members: { draft: { id: "", name: "", email: "", role: "member", active: true, startDate: "", tags: [], ...draft } }
 })
 
 const membersTable = (events: Array<Event>) => elements(events, "members-table")
@@ -177,16 +177,16 @@ describe("live record", () => {
     const s = await app.stream("/teams/2/view", {})
     const first = await s.until((e) => elements(e, "teams-record") !== "")
     expect(elements(first, "teams-record")).toMatch(/<h1[^>]*>Growth<\/h1>/)
-    await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth Eng" } } })
+    await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth Eng", description: "" } } })
     const next = await s.until((e) => elements(e, "teams-record") !== "")
     await s.close()
     expect(elements(next, "teams-record")).toMatch(/<h1[^>]*>Growth Eng<\/h1>/)
     expect(await app.page("/teams/2")).toContain("<title>Growth Eng</title>")
-    await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth" } } })
+    await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth", description: "" } } })
   })
 
   it("shows a notice once the team is deleted", async () => {
-    await app.action("POST", "/teams", { teams: { draft: { id: "", name: "Doomed" } } })
+    await app.action("POST", "/teams", { teams: { draft: { id: "", name: "Doomed", description: "" } } })
     const s = await app.stream("/teams/6/view", {})
     await s.until((e) => elements(e, "teams-record").includes("Doomed"))
     await app.action("DELETE", "/teams/6")
@@ -205,7 +205,7 @@ describe("editing on the detail page", () => {
     expect(html).toContain(`id="teams-dialog"`)
     // The dialog's signals, without a query: there is no teams table on this page.
     const all = [...raw.matchAll(/data-signals="([^"]*)"/g)].map((m) => JSON.parse(decode(m[1]!)))
-    expect(all.find((s) => "teams" in s)).toEqual({ teams: { draft: { id: "", name: "" }, errors: { name: "" }, dialog: false } })
+    expect(all.find((s) => "teams" in s)).toEqual({ teams: { draft: { id: "", name: "", description: "" }, errors: { name: "", description: "" }, dialog: false } })
   })
 
   it("edits through the dialog, with validation, and the live record follows", async () => {
@@ -215,22 +215,22 @@ describe("editing on the detail page", () => {
     expect(signals(edit.events)[0].teams).toMatchObject({ dialog: true, draft: { id: 4 } })
     const name = signals(edit.events)[0].teams.draft.name
 
-    const invalid = await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name: " " } } })
-    expect(signals(invalid.events)[0].teams.errors).toEqual({ name: "Name is required" })
-    const taken = await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name: "Growth" } } })
-    expect(signals(taken.events)[0].teams.errors).toEqual({ name: "A team with that name already exists" })
+    const invalid = await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name: " ", description: "" } } })
+    expect(signals(invalid.events)[0].teams.errors).toEqual({ name: "Name is required", description: "" })
+    const taken = await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name: "Growth", description: "" } } })
+    expect(signals(taken.events)[0].teams.errors).toEqual({ name: "A team with that name already exists", description: "" })
 
-    const saved = await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name: "Renamed Here" } } })
+    const saved = await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name: "Renamed Here", description: "" } } })
     expect(toasts(saved.events)).toEqual(["Saved Renamed Here"])
     expect(signals(saved.events)[0].teams).toMatchObject({ dialog: false })
     const next = await s.until((e) => elements(e, "teams-record").includes("Renamed Here"))
     await s.close()
     expect(decode(elements(next, "teams-record"))).toContain(`@delete('/teams/4?from=detail'`)
-    await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name } } })
+    await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name, description: "" } } })
   })
 
   it("delete goes back to the list; a restricted delete stays, with a toast", async () => {
-    await app.action("POST", "/teams", { teams: { draft: { id: "", name: "Short Lived" } } })
+    await app.action("POST", "/teams", { teams: { draft: { id: "", name: "Short Lived", description: "" } } })
     const id = /\/teams\/(\d+)"[^>]*>Short Lived</.exec(await app.page("/teams?name=Short"))![1]
     const deleted = await app.action("DELETE", `/teams/${id}?from=detail`)
     expect(deleted.events).toEqual([{
@@ -246,7 +246,7 @@ describe("editing on the detail page", () => {
     expect(restricted.events.some((e) => e.type === "patch-elements" && e.selector === "body")).toBe(false)
 
     // From the list (no `from=detail`), a delete just toasts.
-    await app.action("POST", "/teams", { teams: { draft: { id: "", name: "Listed" } } })
+    await app.action("POST", "/teams", { teams: { draft: { id: "", name: "Listed", description: "" } } })
     const listed = /\/teams\/(\d+)"[^>]*>Listed</.exec(await app.page("/teams?name=Listed"))![1]
     expect(toasts((await app.action("DELETE", `/teams/${listed}`)).events)).toEqual(["Deleted"])
   })
@@ -259,13 +259,13 @@ describe("editing on the detail page", () => {
 
     const s = await app.stream("/users/1/view", {})
     await s.until((e) => elements(e, "users-record") !== "")
-    await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth Team" } } })
+    await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth Team", description: "" } } })
     const select = (events: Array<Event>) =>
       events.flatMap((e) => (e.type === "patch-elements" && e.selector === "#users-field-teamId" ? [e.elements] : []))
     const next = await s.until((events) => select(events).length > 0)
     await s.close()
     expect(decode(select(next)[0]!)).toContain(`"label":"Growth Team"`)
-    await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth" } } })
+    await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth", description: "" } } })
   })
 })
 
