@@ -364,15 +364,15 @@ export const define = <
       (request) => new URL(request.url, "http://localhost").searchParams
     )
     /** The table a request is for: the list's, or an embed's with its validated lock value. */
-    const target = Effect.flatMap(searchParams, (params) => {
+    const target = Effect.flatMap(searchParams, (params): Effect.Effect<{ table: Table; lock: Lock }, ScopeError> => {
       const embed = params.get(EMBED)
       const raw = params.get(SCOPE)
-      if (embed === null && raw === null) return Effect.succeed({ table: list, lock: undefined as Lock })
+      if (embed === null && raw === null) return Effect.succeed({ table: list, lock: undefined })
       const locked = embed === null ? undefined : tables.get(embed)
       const lock = locked?.parse(raw ?? "")
       return locked === undefined || lock === undefined
         ? Effect.fail(new ScopeError({ embed, raw }))
-        : Effect.succeed({ table: locked.table, lock: lock as Lock })
+        : Effect.succeed({ table: locked.table, lock })
     })
 
     const prefix = `/${name}` as const
@@ -816,9 +816,7 @@ export const define = <
 
     const embedSections = new Map<string, (value: unknown) => Section<unknown>>()
     for (const embed of embeds) {
-      if (embed.name === name || tables.has(embed.name)) {
-        throw new Error(`Resource ${name}: embed name "${embed.name}" is already used`)
-      }
+      if (tables.has(embed.name)) throw new Error(`Resource ${name}: two embeds are named "${embed.name}"`)
       const locked = query.lock(embed.lock as FK)
       const embedded = table({
         ns: embed.name,
@@ -1081,6 +1079,8 @@ export const app = <const Specs extends readonly [AnySpec, ...Array<AnySpec>]>(.
   const embeds = specs.flatMap((s) => s.embeds)
   for (const e of embeds) {
     if (!names.includes(e.target)) throw new Error(`Resource.app: embed "${e.name}" needs resource "${e.target}"`)
+    // Its signals and DOM ids would clash with a resource's dialog or table.
+    if (names.includes(e.name)) throw new Error(`Resource.app: embed "${e.name}" has a resource's name`)
   }
   const built = new Map(specs.map((s) => [s.name, s.build(embeds.filter((e) => e.target === s.name))]))
   const sectionOf = (e: AnyEmbed) => built.get(e.target)!.section(e)

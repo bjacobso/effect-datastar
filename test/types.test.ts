@@ -77,3 +77,13 @@ describe("Resource types", () => {
     expect(endpoints.update.call({ id: 3 })).toBe("@put('/users/3')")
   })
 })
+
+describe("Resource.app checks at startup", () => {
+  it("rejects a resource given twice and clashing embed names", () => {
+    expect(() => Resource.app(Teams, Teams)).toThrow(`"teams" is given twice`)
+    const members = Users.embed({ name: "members", title: "Members", lock: "teamId" })
+    expect(() => Resource.app(Users, Teams.with({ sections: [members, members] }))).toThrow(`two embeds are named "members"`)
+    const named = Users.embed({ name: "teams", title: "Members", lock: "teamId" })
+    expect(() => Resource.app(Users, Teams.with({ sections: [named] }))).toThrow(`embed "teams" has a resource's name`)
+  })
+})
