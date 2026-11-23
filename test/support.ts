@@ -81,7 +81,7 @@ export const makeApp = (options?: {
   const stream = async (path: string, signals: unknown) => {
     const controller = new AbortController()
     const response = await handler(
-      new Request(`${url(path)}?datastar=${encodeURIComponent(JSON.stringify(signals))}`, {
+      new Request(`${url(path)}${path.includes("?") ? "&" : "?"}datastar=${encodeURIComponent(JSON.stringify(signals))}`, {
         signal: controller.signal
       })
     )

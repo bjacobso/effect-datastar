@@ -1,9 +1,8 @@
 import * as Resource from "../crud/Resource.tsx"
 import { Layout } from "./Layout.tsx"
-import { Teams } from "./Teams.tsx"
 import { User } from "./User.ts"
 
-export const Users = Resource.make({
+export const Users = Resource.define({
   name: "users",
   title: "Users",
   noun: "user",
@@ -16,8 +15,6 @@ export const Users = Resource.make({
     defaultSort: ["createdAt", "desc"],
     pageSizes: [10, 25, 50]
   },
-  // Options, table labels and live invalidation for `teamId` come from the teams resource.
-  relations: { teamId: Teams.Lookup },
   messages: {
     unique: { email: "Email is already taken" },
     invalidReference: { teamId: "That team no longer exists" }

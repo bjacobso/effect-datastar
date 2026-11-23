@@ -7,6 +7,11 @@
  *
  * Path params are typed from the path literal, and `include` restricts which
  * signals the browser sends (checked against the signals schema).
+ *
+ * A `prefix` without params (e.g. a generic `/${name}`) is prepended at
+ * runtime and kept in the `path` type, while params are typed from `path`:
+ *
+ *   Endpoint.make("PUT", "/:id", handler, { prefix: `/${name}` })  // path: `/${Name}/:id`
  */
 import type { Effect, Stream } from "effect"
 import { HttpRouter } from "effect/http"
@@ -33,24 +38,32 @@ export interface CallOptions {
   readonly include?: ReadonlyArray<SignalPath> | undefined
   /** Keep the request open while the tab is hidden (long-lived views). */
   readonly openWhenHidden?: boolean | undefined
+  /** Search params appended to the URL (`?embed=members&scope=2`). */
+  readonly search?: Readonly<Record<string, string>> | undefined
 }
 
-export interface Endpoint<P extends string, R> {
+export interface Endpoint<P extends string, R, Prefix extends string = ""> {
   readonly method: Method
-  readonly path: P
+  readonly path: `${Prefix}${P}`
   readonly route: HttpRouter.Route<never, R>
   readonly call: {} extends ParamsOf<P> ? (params?: ParamsOf<P>, options?: CallOptions) => Expr
     : (params: ParamsOf<P>, options?: CallOptions) => Expr
 }
 
-export const make = <const P extends HttpRouter.PathInput, R>(
+export const make = <const P extends HttpRouter.PathInput | "", R, const Prefix extends string = "">(
   method: Method,
   path: P,
   handler: Effect.Effect<Datastar.Events, never, R> | Stream.Stream<Datastar.Events, never, R>,
-  options?: { readonly include?: ReadonlyArray<SignalPath> }
-): Endpoint<P, Exclude<R, HttpRouter.Provided>> => {
+  options?: {
+    readonly include?: ReadonlyArray<SignalPath>
+    /** Param-free path prefix, e.g. `/${name}`. */
+    readonly prefix?: Prefix
+  }
+): Endpoint<P, Exclude<R, HttpRouter.Provided>, Prefix> => {
+  const full = `${options?.prefix ?? ""}${path}` as `${Prefix}${P}`
   const call = (params?: Record<string, Param>, callOptions?: CallOptions): Expr => {
-    const url = path.replace(/:(\w+)/g, (_, name: string) => {
+    const search = new URLSearchParams(callOptions?.search).toString()
+    const url = (search ? `${full}?${search}` : full).replace(/:(\w+)/g, (_, name: string) => {
       const value = params?.[name]
       return value instanceof Js ? `' + encodeURIComponent(${value.expr}) + '` : encodeURIComponent(String(value ?? ""))
     })
@@ -63,8 +76,8 @@ export const make = <const P extends HttpRouter.PathInput, R>(
   }
   return {
     method,
-    path,
-    route: HttpRouter.route(method, path, Datastar.respond(handler)),
+    path: full,
+    route: HttpRouter.route(method, full as HttpRouter.PathInput, Datastar.respond(handler)),
     call: call as any
   }
 }

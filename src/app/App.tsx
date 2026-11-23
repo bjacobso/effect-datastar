@@ -7,16 +7,12 @@ import * as DistributedReactivity from "../reactivity/DistributedReactivity.ts"
 import * as SqliteBroadcast from "../reactivity/SqliteBroadcast.ts"
 import { ApiRoutes } from "./Api.ts"
 import * as Db from "./Db.ts"
-import { TeamMembers, TeamRoutes } from "./TeamDetail.tsx"
-import { Teams } from "./Teams.tsx"
-import { Users } from "./Users.tsx"
+import { Resources } from "./Resources.ts"
 
 /** All routes. */
 export const Routes = Layer.mergeAll(
   HttpRouter.add("GET", "/", HttpServerResponse.redirect("/users")),
-  Users.routes,
-  TeamRoutes,
-  TeamMembers.routes,
+  Resources.routes,
   // JSON API under /api, through the same repos (so it updates live views too).
   ApiRoutes,
   HttpStaticServer.layer({ root: "public" })
@@ -35,7 +31,7 @@ export const Infra = (db: {
   /** How often to poll for other processes' invalidations (default 100 millis). */
   readonly pollInterval?: Duration.Input
 }) =>
-  Layer.mergeAll(Users.layer, Teams.layer).pipe(
+  Resources.layer.pipe(
     Layer.provideMerge(DistributedReactivity.layer),
     Layer.provide(SqliteBroadcast.layer({ pollInterval: db.pollInterval })),
     Layer.provideMerge(Db.layer(db))

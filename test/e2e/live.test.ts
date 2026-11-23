@@ -305,6 +305,61 @@ describe("team detail page", () => {
     await Promise.all([detail.close(), users.close(), teams.close()])
   })
 
+  it("edits the record in place, follows a rename from another tab, and deletes back to the list", async () => {
+    const teams = await open("/teams")
+    await teams.getByRole("button", { name: "New team" }).click()
+    await dialog(teams).locator("input[type=text]").fill("Detail Team")
+    await save(teams)
+    const taken = await teams.locator("tbody a").filter({ hasNotText: "Detail" }).first().innerText()
+    await teams.locator("tbody a", { hasText: "Detail Team" }).click()
+    await teams.waitForURL(/\/teams\/\d+$/)
+    const detail = teams
+    const heading = detail.locator("#teams-record h1")
+    await expect.poll(() => heading.innerText()).toBe("Detail Team")
+
+    // Edit: the same dialog and validation as the list.
+    await detail.locator("#teams-record").getByRole("button", { name: "Edit" }).click()
+    await expect.poll(() => dialog(detail).locator("input[type=text]").inputValue()).toBe("Detail Team")
+    await dialog(detail).locator("input[type=text]").fill(taken)
+    await dialog(detail).locator("button[type=submit]").click()
+    await expect.poll(() => dialog(detail).innerText()).toContain("A team with that name already exists")
+    await dialog(detail).locator("input[type=text]").fill("Detail Edited")
+    await save(detail)
+    await expect.poll(() => heading.innerText()).toBe("Detail Edited")
+    await expect.poll(() => detail.locator("#toast").innerText()).toBe("Saved Detail Edited")
+
+    // A rename in another tab shows up here.
+    const other = await open("/teams?name=Detail")
+    await other.locator("tbody button", { hasText: "Edit" }).click()
+    await dialog(other).locator("input[type=text]").fill("Detail Remote")
+    await save(other)
+    await expect.poll(() => heading.innerText()).toBe("Detail Remote")
+
+    // Delete: back to the list, where the team is gone.
+    await detail.locator("#teams-record").getByRole("button", { name: "Delete" }).click()
+    await detail.waitForURL(/\/teams$/)
+    await detail.locator("tbody tr").first().waitFor()
+    expect(await detail.locator("tbody").innerText()).not.toContain("Detail Remote")
+
+    expect([...detail.errors, ...other.errors]).toEqual([])
+    await Promise.all([detail.close(), other.close()])
+  })
+
+  it("a user's page changes the team through the select island", async () => {
+    const users = await open("/users?sort=name&dir=asc")
+    await users.locator("tbody a").first().click()
+    await users.waitForURL(/\/users\/\d+$/)
+    const page = users
+    await page.locator("#users-record").getByRole("button", { name: "Edit" }).click()
+    await expect.poll(() => dialog(page).count()).toBe(1)
+    await pickTeam(page, "Design")
+    await save(page)
+    await expect.poll(() => page.locator("#users-record-teamId").innerText()).toBe("Design")
+    expect(await page.locator("#users-record-teamId a").getAttribute("href")).toBe("/teams/3")
+    expect(page.errors).toEqual([])
+    await page.close()
+  })
+
   it("404s for unknown and malformed ids", async () => {
     const page = await browser.newPage()
     expect((await page.goto(base + "/teams/999"))!.status()).toBe(404)

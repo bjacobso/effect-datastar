@@ -2,7 +2,7 @@ import * as Resource from "../crud/Resource.tsx"
 import { Layout } from "./Layout.tsx"
 import { Team } from "./Team.ts"
 
-export const Teams = Resource.make({
+export const Teams = Resource.define({
   name: "teams",
   title: "Teams",
   noun: "team",

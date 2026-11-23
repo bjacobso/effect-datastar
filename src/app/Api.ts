@@ -5,11 +5,10 @@
 import { Layer } from "effect"
 import { HttpApi, HttpApiBuilder, HttpApiScalar, OpenApi } from "effect/http-api"
 import * as Api from "../crud/Api.ts"
-import { Teams } from "./Teams.tsx"
-import { Users } from "./Users.tsx"
+import { Resources } from "./Resources.ts"
 
-export const UsersApi = Api.make(Users)
-export const TeamsApi = Api.make(Teams)
+export const UsersApi = Api.make(Resources.resources.users)
+export const TeamsApi = Api.make(Resources.resources.teams)
 
 export class AppApi extends HttpApi.make("effect-datastar")
   .add(UsersApi.group)

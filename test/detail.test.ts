@@ -37,7 +37,7 @@ const membersTable = (events: Array<Event>) => elements(events, "members-table")
 const hasMembers = (events: Array<Event>) => membersTable(events) !== ""
 
 const members = async (teamId: number | string, q: unknown, done: (e: Array<Event>) => boolean = hasMembers) => {
-  const s = await app.stream(`/users/embed/members/${teamId}/view`, q)
+  const s = await app.stream(`/users/view?embed=members&scope=${teamId}`, q)
   const first = await s.until(done)
   return { ...s, first, next: () => s.until(hasMembers) }
 }
@@ -47,7 +47,7 @@ describe("team detail page", () => {
     const html = await app.page("/teams/2")
     expect(html).toMatch(/<h1[^>]*>Growth<\/h1>/)
     expect(decode(html)).toContain(`data-init="@get('/teams/2/view'`)
-    expect(decode(html)).toContain(`data-init="@get('/users/embed/members/2/view'`)
+    expect(decode(html)).toContain(`data-init="@get('/users/view?embed=members&scope=2'`)
     expect(total(html)).toBe(15)
 
     // Same members as the users list filtered by team.
@@ -120,18 +120,18 @@ describe("locked filter", () => {
   })
 
   it("ignores a teamId in the draft and can't reach rows outside the lock", async () => {
-    const created = await app.action("POST", "/users/embed/members/2", memberDraft({ name: "Sneaky", email: "sneaky@example.com", teamId: "3" }))
+    const created = await app.action("POST", "/users?embed=members&scope=2", memberDraft({ name: "Sneaky", email: "sneaky@example.com", teamId: "3" }))
     expect(toasts(created.events)).toEqual(["Created Sneaky"])
     const s = await members(2, membersQuery({}, { name: "Sneaky" }))
     await s.close()
     expect(rowNames(membersTable(s.first))).toEqual(["Sneaky"])
 
     // User 2 is in team 3, not team 2.
-    const edit = await app.action("GET", "/users/embed/members/2/2/edit")
+    const edit = await app.action("GET", "/users/2/edit?embed=members&scope=2")
     expect(toasts(edit.events)).toEqual(["That user no longer exists"])
-    const update = await app.action("PUT", "/users/embed/members/2/2", memberDraft({ name: "Hijacked", email: "x@example.com" }))
+    const update = await app.action("PUT", "/users/2?embed=members&scope=2", memberDraft({ name: "Hijacked", email: "x@example.com" }))
     expect(toasts(update.events)).toEqual(["That user no longer exists"])
-    const remove = await app.action("DELETE", "/users/embed/members/2/2")
+    const remove = await app.action("DELETE", "/users/2?embed=members&scope=2")
     expect(toasts(remove.events)).toEqual(["That user no longer exists"])
     const user2 = await app.action("GET", "/users/2/edit")
     expect(signals(user2.events)[0].users.draft).toMatchObject({ teamId: "3" })
@@ -142,7 +142,7 @@ describe("embedded mutations", () => {
   it("creating a member in the embedded view makes it appear, in that team", async () => {
     const s = await members(3, membersQuery())
     const before = total(membersTable(s.first))
-    const created = await app.action("POST", "/users/embed/members/3", memberDraft({ name: "New Member", email: "new.member@example.com" }))
+    const created = await app.action("POST", "/users?embed=members&scope=3", memberDraft({ name: "New Member", email: "new.member@example.com" }))
     expect(toasts(created.events)).toEqual(["Created New Member"])
     expect(signals(created.events)[0].members).toMatchObject({ dialog: false })
     const next = await s.next()
@@ -158,16 +158,16 @@ describe("embedded mutations", () => {
     const s = await members(3, membersQuery({}, { name: "New Member" }))
     await s.close()
     const id = /<tr id="members-(\d+)"/.exec(membersTable(s.first))![1]
-    const edit = await app.action("GET", `/users/embed/members/3/${id}/edit`)
+    const edit = await app.action("GET", `/users/${id}/edit?embed=members&scope=3`)
     expect(signals(edit.events)[0].members).toMatchObject({ dialog: true, draft: { id: Number(id), name: "New Member" } })
-    const saved = await app.action("PUT", `/users/embed/members/3/${id}`, memberDraft({ name: "Renamed Member", email: "new.member@example.com" }))
+    const saved = await app.action("PUT", `/users/${id}?embed=members&scope=3`, memberDraft({ name: "Renamed Member", email: "new.member@example.com" }))
     expect(toasts(saved.events)).toEqual(["Saved Renamed Member"])
     const user = await app.action("GET", `/users/${id}/edit`)
     expect(signals(user.events)[0].users.draft).toMatchObject({ name: "Renamed Member", teamId: "3" })
   })
 
   it("field errors are patched into the embed's namespace", async () => {
-    const { events } = await app.action("POST", "/users/embed/members/3", memberDraft({ name: " ", email: "nope" }))
+    const { events } = await app.action("POST", "/users?embed=members&scope=3", memberDraft({ name: " ", email: "nope" }))
     expect(signals(events)[0].members.errors).toMatchObject({ name: "Name is required", email: "Enter a valid email" })
   })
 })
@@ -193,5 +193,96 @@ describe("live record", () => {
     const next = await s.until((e) => elements(e, "teams-record") !== "")
     await s.close()
     expect(elements(next, "teams-record")).toContain("This team no longer exists.")
+  })
+})
+
+describe("editing on the detail page", () => {
+  it("has Edit and Delete for the record, and the resource's own dialog", async () => {
+    const raw = await app.page("/teams/2")
+    const html = decode(raw)
+    expect(html).toContain(`data-on:click="@get('/teams/2/edit'`)
+    expect(html).toContain(`@delete('/teams/2?from=detail'`)
+    expect(html).toContain(`id="teams-dialog"`)
+    // The dialog's signals, without a query: there is no teams table on this page.
+    const all = [...raw.matchAll(/data-signals="([^"]*)"/g)].map((m) => JSON.parse(decode(m[1]!)))
+    expect(all.find((s) => "teams" in s)).toEqual({ teams: { draft: { id: "", name: "" }, errors: { name: "" }, dialog: false } })
+  })
+
+  it("edits through the dialog, with validation, and the live record follows", async () => {
+    const s = await app.stream("/teams/4/view", {})
+    await s.until((e) => elements(e, "teams-record") !== "")
+    const edit = await app.action("GET", "/teams/4/edit")
+    expect(signals(edit.events)[0].teams).toMatchObject({ dialog: true, draft: { id: 4 } })
+    const name = signals(edit.events)[0].teams.draft.name
+
+    const invalid = await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name: " " } } })
+    expect(signals(invalid.events)[0].teams.errors).toEqual({ name: "Name is required" })
+    const taken = await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name: "Growth" } } })
+    expect(signals(taken.events)[0].teams.errors).toEqual({ name: "A team with that name already exists" })
+
+    const saved = await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name: "Renamed Here" } } })
+    expect(toasts(saved.events)).toEqual(["Saved Renamed Here"])
+    expect(signals(saved.events)[0].teams).toMatchObject({ dialog: false })
+    const next = await s.until((e) => elements(e, "teams-record").includes("Renamed Here"))
+    await s.close()
+    expect(decode(elements(next, "teams-record"))).toContain(`@delete('/teams/4?from=detail'`)
+    await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name } } })
+  })
+
+  it("delete goes back to the list; a restricted delete stays, with a toast", async () => {
+    await app.action("POST", "/teams", { teams: { draft: { id: "", name: "Short Lived" } } })
+    const id = /\/teams\/(\d+)"[^>]*>Short Lived</.exec(await app.page("/teams?name=Short"))![1]
+    const deleted = await app.action("DELETE", `/teams/${id}?from=detail`)
+    expect(deleted.events).toEqual([{
+      type: "patch-elements",
+      selector: "body",
+      mode: "append",
+      elements: `<script data-effect="el.remove()">window.location.assign("/teams")</script>`
+    }])
+    expect((await app.handler(new Request(`http://test/teams/${id}`))).status).toBe(404)
+
+    const restricted = await app.action("DELETE", "/teams/2?from=detail")
+    expect(toasts(restricted.events)).toEqual(["This team still has members. Move them first."])
+    expect(restricted.events.some((e) => e.type === "patch-elements" && e.selector === "body")).toBe(false)
+
+    // From the list (no `from=detail`), a delete just toasts.
+    await app.action("POST", "/teams", { teams: { draft: { id: "", name: "Listed" } } })
+    const listed = /\/teams\/(\d+)"[^>]*>Listed</.exec(await app.page("/teams?name=Listed"))![1]
+    expect(toasts((await app.action("DELETE", `/teams/${listed}`)).events)).toEqual(["Deleted"])
+  })
+
+  it("a user's page edits the team through the relation select, which stays live", async () => {
+    const html = decode(await app.page("/users/1"))
+    expect(html).toContain(`@get('/users/1/edit'`)
+    expect(html).toContain(`id="users-field-teamId"`)
+    expect(html).toContain(`"label":"Growth"`)
+
+    const s = await app.stream("/users/1/view", {})
+    await s.until((e) => elements(e, "users-record") !== "")
+    await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth Team" } } })
+    const select = (events: Array<Event>) =>
+      events.flatMap((e) => (e.type === "patch-elements" && e.selector === "#users-field-teamId" ? [e.elements] : []))
+    const next = await s.until((events) => select(events).length > 0)
+    await s.close()
+    expect(decode(select(next)[0]!)).toContain(`"label":"Growth Team"`)
+    await app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth" } } })
+  })
+})
+
+describe("shared routes", () => {
+  it("an embed uses its resource's routes; there are no per-embed routes", async () => {
+    expect((await app.handler(new Request("http://test/users/embed/members/2/view"))).status).toBe(404)
+  })
+
+  it("rejects an unknown embed, a scope without an embed, and an embed without a scope", async () => {
+    for (const search of ["embed=nope&scope=2", "scope=2", "embed=members"]) {
+      const s = await app.stream(`/users/view?${search}`, membersQuery())
+      const first = await s.until((e) => e.length > 0)
+      await s.close()
+      expect(toasts(first), search).toEqual(["Something went wrong (ScopeError)"])
+      const created = await app.action("POST", `/users?${search}`, memberDraft({ name: "Nobody", email: "nobody@example.com" }))
+      expect(toasts(created.events), search).toEqual(["Something went wrong (ScopeError)"])
+    }
+    expect(await app.page("/users?name=Nobody")).not.toContain(">Nobody<")
   })
 })

@@ -42,6 +42,21 @@ export const patchElements = (
 export const removeElements = (selector: string): DatastarEvent =>
   new PatchElements({ elements: "", selector, mode: "remove" })
 
+/**
+ * Run a script in the browser: a self-removing `<script>` appended to `<body>`
+ * (Datastar v1 has no separate execute-script event).
+ */
+export const executeScript = (script: string): DatastarEvent =>
+  new PatchElements({
+    elements: `<script data-effect="el.remove()">${script.replace(/<\/script/gi, "<\\/script")}</script>`,
+    selector: "body",
+    mode: "append"
+  })
+
+/** Navigate the browser to `url` (a same-origin path). */
+export const redirect = (url: string): DatastarEvent =>
+  executeScript(`window.location.assign(${JSON.stringify(url)})`)
+
 export const patchSignals = (signals: unknown, options?: { readonly onlyIfMissing?: boolean }): DatastarEvent =>
   new PatchSignals({ signals, ...options })
 
