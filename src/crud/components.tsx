@@ -336,6 +336,8 @@ export const TablePanel = (props: { readonly id: string; readonly busy?: boolean
 // ---------------------------------------------------------------------------
 
 export const Pagination = (props: {
+  /** Lets a live view patch the pagination alone (when only the total changed). */
+  readonly id: string
   readonly query: SignalPath
   readonly page: number
   readonly pages: number
@@ -357,7 +359,7 @@ export const Pagination = (props: {
     </button>
   )
   return (
-    <nav aria-label="Pagination" {...stylex.props(styles.pagination)}>
+    <nav id={props.id} aria-label="Pagination" {...stylex.props(styles.pagination)}>
       <span data-total="" {...stylex.props(styles.total)}>{props.total} total</span>
       <span {...stylex.props(styles.pages)}>
         <PageButton to={1} disabled={props.page <= 1} label="First page" icon="chevronsLeft" />

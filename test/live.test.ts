@@ -115,9 +115,12 @@ describe("users live view, per change", () => {
     expect(s.first).not.toContain(`<tr id="users-2"`)
     expect((await draftOf(2)).role).not.toBe("admin")
     await save(2, { role: "admin" })
-    const events = await s.until(isTable)
+    // User 2 is old: it joins a later page, so this page's rows are the same and only
+    // the pagination (the total) is sent.
+    const events = await s.until((e) => patches(e).some((p) => p.elements.startsWith(`<nav id="users-pagination"`)))
     await s.close()
-    expect(total(tablePatch(events)!.elements)).toBe(before + 1)
+    expect(isTable(events)).toBe(false)
+    expect(total(patches(events)[0]!.elements)).toBe(before + 1)
   })
 
   it("skips updates to off-page rows that can't enter the page", async () => {

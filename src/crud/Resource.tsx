@@ -734,6 +734,8 @@ export const define = <
           const lastOptions = new Map<string, string>()
           /** The table as last rendered (`undefined` once rows were patched since). */
           let lastTable: string | undefined
+          /** The page ids as last sent (`_page`). */
+          let lastIds: string | undefined
           /** The current page (with row patches applied), or the page to clamp to. */
           let current: Repo.Page<Row> | undefined
           let clamp: number | undefined
@@ -796,17 +798,26 @@ export const define = <
               clamp = undefined
               current = page
               const table = render(<TableView page={page} current={q} lookups={lookups} lock={lock} />)
-              // A related row changed (a renamed tag): the page is the same, so only a table
-              // that shows it renders differently. Others send nothing (but their selects).
-              const events = event._tag === "Related" && table === lastTable ? [] : [Datastar.patchElements(table)]
+              // Send only what the tabs don't have. A re-query often renders the same table
+              // (an insert that a filter excludes, a renamed tag the page doesn't show), or the
+              // same rows with a new total (an insert that sorts onto another page): then
+              // nothing, or just the pagination, instead of the whole table.
+              const events: Array<Datastar.DatastarEvent> = []
+              if (table !== lastTable) {
+                const [rows, pagination] = splitPagination(table)
+                const [lastRows] = lastTable === undefined ? [undefined] : splitPagination(lastTable)
+                events.push(Datastar.patchElements(rows === lastRows && pagination !== "" ? pagination : table))
+              }
               lastTable = table
               // Re-send the selects of the relations whose options changed.
               const changed = new Set(Object.keys(lookups).filter((k) => JSON.stringify(lookups[k]) !== lastOptions.get(k)))
               for (const k of changed) lastOptions.set(k, JSON.stringify(lookups[k]))
               if (changed.size > 0) events.push(...relationSelects(lookups, changed))
-              // Same page, same table: the ids are as already sent.
-              if (event._tag === "Related" && events.length === 0) return events
-              events.push(Datastar.patchSignals({ [ns]: { _page: pageIds(page.rows) } }))
+              // The ids on this page, when they changed.
+              const ids = pageIds(page.rows)
+              const idsKey = JSON.stringify(ids)
+              if (idsKey !== lastIds) events.push(Datastar.patchSignals({ [ns]: { _page: ids } }))
+              lastIds = idsKey
               return events
             }),
             Stream.provideContext(context),
@@ -941,6 +952,16 @@ export const define = <
           render: cell(field, lookups, { link: true })
         }))
 
+      const paginationId = `${ns}-pagination`
+      /** A rendered table without its pagination, and the pagination (`""` if it has none). */
+      const splitPagination = (html: string): readonly [string, string] => {
+        const start = html.lastIndexOf(`<nav id="${paginationId}"`)
+        const end = html.indexOf("</nav>", start)
+        return start < 0 || end < 0
+          ? [html, ""]
+          : [html.slice(0, start) + html.slice(end + 6), html.slice(start, end + 6)]
+      }
+
       const rowId = (row: Row) => `${ns}-${String(row[idColumn])}`
       const actions = (lock: Lock) => (row: Row) => {
         const id = String(row[idColumn])
@@ -1002,6 +1023,7 @@ export const define = <
             select={select}
           />
           <Components.Pagination
+            id={paginationId}
             query={path("query")}
             page={props.page.page}
             pages={props.page.pages}

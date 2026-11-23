@@ -96,6 +96,31 @@ describe("shared live tables", () => {
   })
 })
 
+describe("what a re-query sends", () => {
+  it("nothing when the table renders the same, just the pagination when only the total changed", async () => {
+    const admins = await app.stream("/users/view", usersQuery({}, { role: "admin" }))
+    const byName = await app.stream("/users/view", usersQuery({ sort: "name", dir: "asc" }))
+    const newest = await app.stream("/users/view", usersQuery())
+    await Promise.all([admins, byName, newest].map((s) => s.until(hasTable)))
+    await settle()
+    const total = (html: string) => Number(/(\d+) total/.exec(html)?.[1])
+
+    // A member named "Zz": not an admin, last by name, first by creation date.
+    await app.action("POST", "/users", userDraft({ name: "Zz Pagination", email: "zz.pagination@example.com", role: "member" }))
+    const first = await newest.until((e) => tableOf(e)?.includes("Zz Pagination") === true)
+    const before = total(tableOf(first)!)
+    expect(await admins.collect(200)).toEqual([])
+    const sorted = await byName.until((e) => e.some((x) => x.type === "patch-elements"))
+    const patches = sorted.filter((e): e is Patch => e.type === "patch-elements")
+    expect(patches).toHaveLength(1)
+    expect(patches[0]!.elements).toMatch(/^<nav id="users-pagination"/)
+    expect(total(patches[0]!.elements)).toBe(before)
+    // Same rows: no new `_page`.
+    expect(sorted.some((e) => e.type === "patch-signals")).toBe(false)
+    await Promise.all([admins, byName, newest].map((s) => s.close()))
+  })
+})
+
 describe("shared live records", () => {
   const record = (events: Array<Event>) =>
     events.filter((e): e is Patch => e.type === "patch-elements").find((e) => e.elements.includes(`id="users-record"`))?.elements

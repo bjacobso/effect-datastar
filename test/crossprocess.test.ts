@@ -102,12 +102,15 @@ describe("row changes across processes", () => {
     } finally {
       db.close()
     }
-    const events = await s.until(isTable, { settle: 150 })
+    // B re-queries; nothing changed, so the table renders the same and nothing is sent.
+    const deadline = Date.now() + 2000
+    while (viewStatements().pages === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
+    const events = await s.collect(200)
     const counted = viewStatements()
     await s.close()
     console.log("B, bare keys from an older sender:", counted)
 
-    expect(rowPatches(events)).toEqual([])
+    expect(events).toEqual([])
     expect(counted).toEqual({ pages: 1, counts: 1, rows: 0 })
   })
 })
