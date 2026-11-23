@@ -358,18 +358,29 @@ export const make = <
       `${scope.base}/view` as "/resource/:scope/view",
       Stream.unwrap(Effect.gen(function*() {
         const repo = yield* RepoTag
-        const reactivity = yield* Reactivity.Reactivity
         const services = yield* relationServices
         const value = yield* readLock
         const q = yield* readQuery
         const full = fullQuery(q, value)
+        let lookups: Components.Lookups = {}
         let lastOptions: string | undefined
         let urlSent = false
-        return reactivity.stream(
-          [name, ...services.map(([, l]) => l.table)],
-          Effect.all([repo.list(full), lookupsFor(services)])
-        ).pipe(
-          Stream.map(([page, lookups]): Datastar.Events => {
+        return repo.live(full, { dependsOn: services.map(([, l]) => l.table) }).pipe(
+          // Lookups load with the first page and whenever a related table changes.
+          Stream.mapEffect((event) =>
+            event._tag === "Page" && event.reason !== "table"
+              ? Effect.map(lookupsFor(services), (loaded) => {
+                lookups = loaded
+                return event
+              })
+              : Effect.succeed(event)
+          ),
+          Stream.map((event): Datastar.Events => {
+            if (event._tag === "Rows") {
+              // Only these rows changed, in ways that can't move them: patch each `<tr>` by id.
+              return event.rows.map((row) => Datastar.patchElements(<RowView row={row} lookups={lookups} lock={value} />))
+            }
+            const page = event.page
             if (page.page > page.pages) {
               // Out of range (e.g. after deleting the last row on the last page): clamp.
               return Datastar.patchSignals({ [ns]: { query: { page: page.pages } } })
@@ -398,7 +409,8 @@ export const make = <
         const raw = yield* readDraft
         // The lock is not in the form; the server sets it (and ignores any sent value).
         const draft = lockKey !== undefined && value !== undefined ? { ...raw, [lockKey]: value } : raw
-        if (id !== undefined) yield* findInScope(id, value)
+        // Unlocked scopes skip the check: the update or delete itself reports a missing row.
+        if (id !== undefined && value !== undefined) yield* findInScope(id, value)
         const row = id === undefined
           ? yield* repo.insert((model.insert as any).make(yield* Form.decode(model.jsonCreate, draft)))
           : yield* repo.update((model.update as any).make({ ...(yield* Form.decode(model.jsonUpdate, draft)), [idColumn]: id }))
@@ -446,7 +458,8 @@ export const make = <
       Effect.gen(function*() {
         const repo = yield* RepoTag
         const id = yield* readId
-        yield* findInScope(id, yield* readLock)
+        const value = yield* readLock
+        if (value !== undefined) yield* findInScope(id, value)
         yield* repo.delete(id)
         return toast("Deleted")
       }).pipe(
@@ -474,44 +487,52 @@ export const make = <
         render: cell(field, lookups, { link: true })
       }))
 
+    const rowId = (row: Row) => `${ns}-${String(row[idColumn])}`
+    const actions = (lock: string | undefined) => (row: Row) => {
+      const at = { scope: lock ?? "", id: String(row[idColumn]) }
+      return (
+        <>
+          <button class="link" {...ds.on("click", edit.call(at))}>Edit</button>
+          <button
+            class="link danger"
+            {...ds.on("click", `confirm(${JSON.stringify(`Delete ${label(row)}?`)}) && ${remove.call(at)}`)}
+          >
+            Delete
+          </button>
+        </>
+      )
+    }
+
+    /** A single row, as rendered in the table (same id), for row-level patches. */
+    const RowView = (props: { readonly row: Row; readonly lookups: Components.Lookups; readonly lock: string | undefined }) => (
+      <Components.TableRow row={props.row} columns={columnsFor(props.lookups)} rowId={rowId} actions={actions(props.lock)} />
+    )
+
     const TableView = (props: {
       readonly page: Repo.Page<Row>
       readonly current: { readonly sort: string; readonly dir: Query.Dir }
       readonly lookups: Components.Lookups
       readonly lock: string | undefined
-    }) => {
-      const at = (row: Row) => ({ scope: props.lock ?? "", id: String(row[idColumn]) })
-      return (
-        <section id={`${ns}-table`}>
-          <Components.Table
-            id={`${ns}-rows`}
-            columns={columnsFor(props.lookups)}
-            rows={props.page.rows}
-            rowId={(row) => `${ns}-${String(row[idColumn])}`}
-            query={path("query")}
-            current={props.current}
-            actions={(row) => (
-              <>
-                <button class="link" {...ds.on("click", edit.call(at(row)))}>Edit</button>
-                <button
-                  class="link danger"
-                  {...ds.on("click", `confirm(${JSON.stringify(`Delete ${label(row)}?`)}) && ${remove.call(at(row))}`)}
-                >
-                  Delete
-                </button>
-              </>
-            )}
-          />
-          <Components.Pagination
-            query={path("query")}
-            page={props.page.page}
-            pages={props.page.pages}
-            total={props.page.total}
-            pageSizes={query.pageSizes}
-          />
-        </section>
-      )
-    }
+    }) => (
+      <section id={`${ns}-table`}>
+        <Components.Table
+          id={`${ns}-rows`}
+          columns={columnsFor(props.lookups)}
+          rows={props.page.rows}
+          rowId={rowId}
+          query={path("query")}
+          current={props.current}
+          actions={actions(props.lock)}
+        />
+        <Components.Pagination
+          query={path("query")}
+          page={props.page.page}
+          pages={props.page.pages}
+          total={props.page.total}
+          pageSizes={query.pageSizes}
+        />
+      </section>
+    )
 
     interface Initial {
       readonly page: Repo.Page<Row>

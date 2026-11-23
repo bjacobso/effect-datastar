@@ -123,6 +123,21 @@ export interface Column<A> {
   readonly render?: ((row: A) => JSX.Element) | undefined
 }
 
+/** One `<tr>`, with a stable id so a live view can patch just this row. */
+export const TableRow = <A extends object>(props: {
+  readonly row: A
+  readonly columns: ReadonlyArray<Column<A>>
+  readonly rowId: (row: A) => string
+  readonly actions?: ((row: A) => JSX.Element) | undefined
+}) => (
+  <tr id={props.rowId(props.row)}>
+    {props.columns.map((c) => (
+      <td>{c.render ? c.render(props.row) : <span safe>{formatCell(c.field, (props.row as Record<string, unknown>)[c.field.key])}</span>}</td>
+    ))}
+    {props.actions ? <td class="actions">{props.actions(props.row)}</td> : ""}
+  </tr>
+)
+
 export const Table = <A extends object>(props: {
   readonly id: string
   readonly columns: ReadonlyArray<Column<A>>
@@ -150,14 +165,7 @@ export const Table = <A extends object>(props: {
             <td class="empty" colspan={String(props.columns.length + 1)}>Nothing matches these filters.</td>
           </tr>
         )
-        : props.rows.map((row) => (
-          <tr id={props.rowId(row)}>
-            {props.columns.map((c) => (
-              <td>{c.render ? c.render(row) : <span safe>{formatCell(c.field, (row as Record<string, unknown>)[c.field.key])}</span>}</td>
-            ))}
-            {props.actions ? <td class="actions">{props.actions(row)}</td> : ""}
-          </tr>
-        ))}
+        : props.rows.map((row) => <TableRow row={row} columns={props.columns} rowId={props.rowId} actions={props.actions} />)}
     </tbody>
   </table>
 )

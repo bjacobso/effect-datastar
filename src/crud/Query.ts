@@ -52,6 +52,12 @@ export interface QueryDef<Sortable extends string, FilterKey extends string> {
   readonly where: (sql: SqlHelpers, q: ListQuery<Sortable, FilterKey>) => Statement.Fragment
   readonly orderBy: (sql: SqlHelpers, q: ListQuery<Sortable, FilterKey>, idColumn: string) => Statement.Fragment
   /**
+   * Columns that decide which rows a query returns and in what order: the sort
+   * column and every active filter. A change to any other column can't move a
+   * row into, out of, or within the results.
+   */
+  readonly columns: (q: ListQuery<Sortable, FilterKey>) => ReadonlyArray<string>
+  /**
    * URL search params for a query; values equal to the defaults are omitted.
    * Filters use their field name (`?role=admin&teamId=3&sort=name`).
    */
@@ -239,6 +245,10 @@ export const make = <
       }
       return clauses.length === 0 ? sql.literal("") : sql`WHERE ${sql.and(clauses)}`
     },
+    columns: (q) => [
+      q.sort,
+      ...filters.filter((f) => (q.filters as Record<string, string>)[f.key] !== "").map((f) => f.key)
+    ],
     orderBy: (sql, q, idColumn) => {
       const dir = sql.literal(q.dir === "asc" ? "ASC" : "DESC")
       return sql`ORDER BY ${sql(q.sort)} ${dir}, ${sql(idColumn)} ${dir}`
