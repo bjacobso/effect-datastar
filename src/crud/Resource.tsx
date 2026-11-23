@@ -1278,36 +1278,69 @@ export const define = <
      * row) or a related table does (e.g. a rename), and re-sends the edit
      * dialog's relation selects when their options change. Changes to other rows
      * of the table don't wake it, and a re-render that comes out the same isn't sent.
+     *
+     * Tabs showing the same record share it (see `Shared`): one read and one
+     * render per change, and a tab that stops reading is switched to the latest
+     * record instead of queueing every version.
      */
     const record = Endpoint.make(
       "GET",
       "/:id/view",
       Stream.unwrap(Effect.gen(function*() {
         const reactivity = yield* Reactivity.Reactivity
+        const repo = yield* RepoTag
         const services = yield* relationServices
         const id = yield* readId
+        const tenantKey = scope === undefined ? null : (yield* scope.value).encoded
+        const tenantOnly = tenant === undefined
+          ? Context.empty()
+          : Context.pick(tenant.service)(yield* Effect.context<T>())
         // The row's record key under the tenant's table key (as `Reactivity` derives it from
         // `{ [key]: [id] }`), the bare table key for invalidations from outside the repo, and
         // the related tables' keys.
-        const recordKey = `${yield* (yield* RepoTag).key}:${String(encodeId(id))}`
+        const recordKey = `${yield* repo.key}:${String(encodeId(id))}`
         const keys = [recordKey, name, ...yield* Effect.forEach(services, ([, l]) => l.key)]
-        let lastOptions: string | undefined
-        let lastRecord: string | undefined
-        return reactivity.stream(
-          [...new Set(keys)],
-          Effect.all([findRecord(id), lookupsFor(services)])
-        ).pipe(Stream.map(([row, lookups]): Events => {
-          const html = render(<RecordView row={row} lookups={lookups} />)
-          const events = html === lastRecord ? [] : [Datastar.patchElements(html)]
-          lastRecord = html
-          const key = JSON.stringify(lookups)
-          if (lastOptions !== undefined && key !== lastOptions) events.push(...listTable.fieldSelects(lookups))
-          lastOptions = key
-          return events
-        }))
+        const source = Effect.gen(function*() {
+          const context = yield* Effect.context<T>()
+          let lastOptions: string | undefined
+          let lastRecord: string | undefined
+          let lookups: Components.Lookups = {}
+          const read = Effect.all([
+            repo.findById(id).pipe(
+              Effect.map((row): Row | undefined => row),
+              Effect.catchTag("NoSuchElementError", () => Effect.succeed(undefined))
+            ),
+            lookupsFor(services)
+          ])
+          const deltas = reactivity.stream([...new Set(keys)], read).pipe(
+            Stream.map(([row, loaded]): ReadonlyArray<Datastar.DatastarEvent> => {
+              lookups = loaded
+              const html = render(<RecordView row={row} lookups={loaded} />)
+              const events = html === lastRecord ? [] : [Datastar.patchElements(html)]
+              lastRecord = html
+              const key = JSON.stringify(loaded)
+              if (lastOptions !== undefined && key !== lastOptions) events.push(...listTable.fieldSelects(loaded))
+              lastOptions = key
+              return events
+            }),
+            Stream.provideContext(context),
+            Stream.catch((error) => Stream.fromEffect(Effect.map(unexpected(error), (e) => [e])))
+          )
+          const snapshot = (first: boolean): ReadonlyArray<Datastar.DatastarEvent> | undefined =>
+            lastRecord === undefined
+              ? undefined
+              // A tab that fell behind may have missed new select options too.
+              : first
+              ? [Datastar.patchElements(lastRecord)]
+              : [Datastar.patchElements(lastRecord), ...listTable.fieldSelects(lookups)]
+          return { deltas, snapshot } satisfies Shared.Source
+        }).pipe(Effect.provideContext(tenantOnly as Context.Context<T>))
+        return Shared.subscribe(records, JSON.stringify([tenantKey, encodeId(id)]), source)
       })).pipe(Stream.catch((error) => Stream.fromEffect(unexpected(error)))),
       { prefix, include: [] }
     )
+    /** Shared live records, by tenant and id. */
+    const records = Shared.registry()
 
     const notFound = html(
       config.layout({

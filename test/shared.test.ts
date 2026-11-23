@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest"
 import * as Datastar from "../src/datastar/Datastar.ts"
 import * as Shared from "../src/datastar/Shared.ts"
 import { counters } from "../src/metrics/Metrics.ts"
+import { sqlLog } from "./sqlCounter.ts"
 import { type Event, GLOBEX, makeApp, rowNames, userDraft, usersQuery } from "./support.ts"
 
 const app = makeApp()
@@ -92,6 +93,32 @@ describe("shared live tables", () => {
       expect(url).toBe("/users?sort=email&dir=asc")
     }
     await Promise.all([a.close(), b.close()])
+  })
+})
+
+describe("shared live records", () => {
+  const record = (events: Array<Event>) =>
+    events.filter((e): e is Patch => e.type === "patch-elements").find((e) => e.elements.includes(`id="users-record"`))?.elements
+
+  it("reads and renders a record once per change for all its tabs, per organization", async () => {
+    const tabs = await Promise.all(Array.from({ length: 3 }, () => app.stream("/users/2/view", {})))
+    await Promise.all(tabs.map((t) => t.until((e) => record(e) !== undefined)))
+    // Globex asking for an Acme record shares nothing with it: it is "not found" there.
+    const outsider = await globex.stream("/users/2/view", {})
+    expect(record(await outsider.until((e) => record(e) !== undefined))).toContain("no longer exists")
+    await settle()
+
+    const { events } = await app.action("GET", "/users/2/edit")
+    const draft = (events[0] as { signals: { users: { draft: Record<string, unknown> } } }).signals.users.draft
+    sqlLog.reset()
+    await app.action("PUT", "/users/2", userDraft({ ...draft, name: "Shared Record" }))
+    const next = await Promise.all(tabs.map((t) => t.until((e) => record(e)?.includes("Shared Record") === true)))
+    expect(next).toHaveLength(3)
+    // The update reads the row once (its previous version, inside its transaction); the
+    // three tabs' shared record reads it once more.
+    expect(sqlLog.statements.filter((q) => /FROM "users" WHERE/.test(q) && /"id" = \?/.test(q))).toHaveLength(2)
+    expect(await outsider.collect(200)).toEqual([])
+    await Promise.all([...tabs, outsider].map((t) => t.close()))
   })
 })
 
