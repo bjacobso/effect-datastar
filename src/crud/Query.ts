@@ -59,7 +59,12 @@ export interface QueryDef<Sortable extends string, FilterKey extends string> {
   readonly sortable: ReadonlyArray<Sortable>
   readonly pageSizes: ReadonlyArray<number>
   readonly filters: ReadonlyArray<FilterInfo>
-  readonly where: (sql: SqlHelpers, q: ListQuery<Sortable, FilterKey>) => Statement.Fragment
+  /** `WHERE` for the query's filters, and-ed with any `extra` clauses (e.g. a tenant scope). */
+  readonly where: (
+    sql: SqlHelpers,
+    q: ListQuery<Sortable, FilterKey>,
+    extra?: ReadonlyArray<Statement.Fragment>
+  ) => Statement.Fragment
   readonly orderBy: (sql: SqlHelpers, q: ListQuery<Sortable, FilterKey>, idColumn: string) => Statement.Fragment
   /**
    * Columns that decide which rows a query returns and in what order: the sort
@@ -284,8 +289,8 @@ export const make = <
     sortable: config.sortable,
     pageSizes: config.pageSizes,
     filters,
-    where: (sql, q) => {
-      const clauses: Array<Statement.Fragment> = []
+    where: (sql, q, extra = []) => {
+      const clauses: Array<Statement.Fragment> = [...extra]
       for (const f of filters) {
         const raw = (q.filters as Record<string, string>)[f.key]
         if (!raw) continue

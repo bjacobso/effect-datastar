@@ -21,8 +21,14 @@
  * them, so a change made by another server process (through
  * `DistributedReactivity`) is handled exactly like a local one. No payload, or
  * one that doesn't decode, means "unknown change": a full re-query.
+ *
+ * With a `scope` (a tenant, see `Scope.ts`), every read is filtered by the
+ * current tenant, writes set it, rows of other tenants don't exist, references
+ * must stay in the tenant, and the reactivity keys are per tenant
+ * (`{ "users[orgId=1]": [42] }`, unless `isolateKeys` is off). Streams always
+ * listen on the bare table key too, for invalidations from outside the repo.
  */
-import { type Cause, Effect, Option, Queue, Schema, Stream } from "effect"
+import { Cause, Data, Effect, Option, Queue, Schema, Stream } from "effect"
 import type * as Arr from "effect/Array"
 import { Reactivity } from "effect/reactivity"
 import * as Payload from "../reactivity/Payload.ts"
@@ -30,6 +36,10 @@ import type { Model } from "effect/schema"
 import { SqlClient, SqlModel } from "effect/sql"
 import type { SqlError } from "effect/sql"
 import type { ListQuery, QueryDef } from "./Query.ts"
+import * as Scope from "./Scope.ts"
+
+/** A reference column points at a row of another tenant (or at none at all). */
+export class InvalidReference extends Data.TaggedError("InvalidReference")<{ readonly column: string }> {}
 
 export interface Page<A> {
   readonly rows: ReadonlyArray<A>
@@ -88,12 +98,15 @@ export const plan = <Id>(
   return first === undefined ? { _tag: "Skip" } : { _tag: "Rows", ids: [first, ...rest] }
 }
 
-/** The repository a resource works with. */
-export interface Repo<S extends Model.Any, Id extends keyof S["fields"], Sortable extends string, FK extends string> {
+/**
+ * The repository a resource works with. `R` is what its scope needs (the
+ * tenant service), `never` for an unscoped table.
+ */
+export interface Repo<S extends Model.Any, Id extends keyof S["fields"], Sortable extends string, FK extends string, R = never> {
   readonly findById: (
     id: S["fields"][Id]["Type"]
-  ) => Effect.Effect<S["Type"], Cause.NoSuchElementError | Schema.SchemaError | SqlError.SqlError>
-  readonly list: (q: ListQuery<Sortable, FK>) => Effect.Effect<Page<S["Type"]>, SqlError.SqlError | Schema.SchemaError>
+  ) => Effect.Effect<S["Type"], Cause.NoSuchElementError | Schema.SchemaError | SqlError.SqlError, R>
+  readonly list: (q: ListQuery<Sortable, FK>) => Effect.Effect<Page<S["Type"]>, SqlError.SqlError | Schema.SchemaError, R>
   /**
    * The page for `q`, then an update per change: a re-queried page, or just the
    * rows whose content changed. Also re-queries when any `dependsOn` key (e.g.
@@ -102,10 +115,20 @@ export interface Repo<S extends Model.Any, Id extends keyof S["fields"], Sortabl
   readonly live: (
     q: ListQuery<Sortable, FK>,
     options?: { readonly dependsOn?: ReadonlyArray<string> | undefined }
-  ) => Stream.Stream<LiveEvent<S["Type"]>, SqlError.SqlError | Schema.SchemaError>
-  readonly insert: (value: S["insert"]["Type"]) => Effect.Effect<S["Type"], Schema.SchemaError | SqlError.SqlError>
-  readonly update: (value: S["update"]["Type"]) => Effect.Effect<S["Type"], Schema.SchemaError | SqlError.SqlError>
-  readonly delete: (id: S["fields"][Id]["Type"]) => Effect.Effect<void, Schema.SchemaError | SqlError.SqlError>
+  ) => Stream.Stream<LiveEvent<S["Type"]>, SqlError.SqlError | Schema.SchemaError, R>
+  /** Inserts; with a scope, the tenant column is set to the current tenant. */
+  readonly insert: (
+    value: S["insert"]["Type"]
+  ) => Effect.Effect<S["Type"], Schema.SchemaError | SqlError.SqlError | InvalidReference, R>
+  /** Updates; with a scope, a row of another tenant is a `NoSuchElementError`. */
+  readonly update: (
+    value: S["update"]["Type"]
+  ) => Effect.Effect<S["Type"], Cause.NoSuchElementError | Schema.SchemaError | SqlError.SqlError | InvalidReference, R>
+  readonly delete: (
+    id: S["fields"][Id]["Type"]
+  ) => Effect.Effect<void, Cause.NoSuchElementError | Schema.SchemaError | SqlError.SqlError, R>
+  /** The reactivity key this table's changes are announced on, for the current scope. */
+  readonly key: Effect.Effect<string, never, R>
 }
 
 const sameValue = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b)
@@ -114,11 +137,20 @@ export const make = <
   S extends Model.Any & Schema.Codec<any, any, never, never>,
   const Id extends (keyof S["Type"]) & (keyof S["update"]["Type"]) & (keyof S["fields"]) & string,
   Sortable extends string,
-  FK extends string
+  FK extends string,
+  R = never
 >(
   model: S,
-  options: { readonly table: string; readonly idColumn: Id; readonly query: QueryDef<Sortable, FK> }
-): Effect.Effect<Repo<S, Id, Sortable, FK>, never, SqlClient.SqlClient | Reactivity.Reactivity> =>
+  options: {
+    readonly table: string
+    readonly idColumn: Id
+    readonly query: QueryDef<Sortable, FK>
+    /** Tenant scope (see `Scope.ts`). */
+    readonly scope?: Scope.Scope<R> | undefined
+    /** Columns that reference other tables; checked against the current tenant on writes. */
+    readonly references?: ReadonlyArray<readonly [column: string, target: Scope.ReferenceTarget]> | undefined
+  }
+): Effect.Effect<Repo<S, Id, Sortable, FK, R>, never, SqlClient.SqlClient | Reactivity.Reactivity> =>
   Effect.gen(function*() {
     type Row = S["Type"]
     type RowId = S["fields"][Id]["Type"]
@@ -135,9 +167,41 @@ export const make = <
     const idOf = (row: Row): RowId => row[options.idColumn]
     const columns = Object.keys(model.fields)
 
-    const list = (q: ListQuery<Sortable, FK>): Effect.Effect<Page<Row>, SqlError.SqlError | Schema.SchemaError> =>
+    // --- scope ---------------------------------------------------------------
+
+    const scope = options.scope
+    /** The current tenant (`undefined` when unscoped). */
+    type Current = Scope.Current | undefined
+    const tenant: Effect.Effect<Current, never, R> = scope === undefined ? Effect.succeed(undefined) : scope.value
+    const inScope = (v: Current) => (v === undefined || scope === undefined ? [] : [sql`${sql(scope.column)} = ${v.encoded}`])
+    const keyFor = (v: Current) =>
+      v === undefined || scope === undefined || !scope.isolateKeys ? options.table : Scope.key(options.table, scope.column, v.encoded)
+    const encodeId = Schema.encodeUnknownEffect(model.fields[options.idColumn] as Schema.Codec<RowId, unknown>)
+    const references = (options.references ?? []).flatMap(([column, target]) => {
+      const tenantColumn = target.tenantColumn
+      if (tenantColumn === undefined) return []
+      const encode = Schema.encodeUnknownEffect(model.fields[column] as Schema.Codec<unknown, unknown>)
+      return [{ column, target, tenantColumn, encode }]
+    })
+    /** Every non-null reference must point at a row of the current tenant (the foreign key alone can't tell). */
+    const checkReferences = (value: unknown, v: Current) =>
+      Effect.forEach(references, (ref) =>
+        Effect.gen(function*() {
+          const raw = (value as Readonly<Record<string, unknown>>)[ref.column]
+          if (v === undefined || raw === null || raw === undefined) return
+          const encoded = yield* ref.encode(raw)
+          const found = yield* sql`SELECT 1 AS ok FROM ${sql(ref.target.table)}
+            WHERE ${sql(ref.target.idColumn)} = ${encoded as string | number}
+            AND ${sql(ref.tenantColumn)} = ${v.encoded} LIMIT 1`
+          if (found.length === 0) return yield* Effect.fail(new InvalidReference({ column: ref.column }))
+        }), { discard: true })
+    /** `value` with the tenant column set to the current tenant. */
+    const withTenant = <A,>(value: A, v: Current): A =>
+      v === undefined || scope === undefined ? value : { ...value, [scope.column]: v.id }
+
+    const listIn = (q: ListQuery<Sortable, FK>, v: Current): Effect.Effect<Page<Row>, SqlError.SqlError | Schema.SchemaError> =>
       Effect.gen(function*() {
-        const where = options.query.where(sql, q)
+        const where = options.query.where(sql, q, inScope(v))
         const [rows, counted] = yield* Effect.all([
           sql`SELECT * FROM ${table} ${where} ${options.query.orderBy(sql, q, options.idColumn)}
               LIMIT ${q.pageSize} OFFSET ${(q.page - 1) * q.pageSize}`,
@@ -151,12 +215,30 @@ export const make = <
           pages: Math.max(1, Math.ceil(total / q.pageSize))
         }
       }).pipe(Effect.withSpan(`${options.table}.list`))
+    const list = (q: ListQuery<Sortable, FK>) => Effect.flatMap(tenant, (v) => listIn(q, v))
 
-    const findByIds = (ids: ReadonlyArray<RowId>) =>
-      sql`SELECT * FROM ${table} WHERE ${sql.in(options.idColumn, ids)}`.pipe(
+    const findByIds = (ids: ReadonlyArray<RowId>, v: Current) =>
+      sql`SELECT * FROM ${table} WHERE ${sql.and([sql.in(options.idColumn, ids), ...inScope(v)])}`.pipe(
         Effect.flatMap(decodeRows),
         Effect.withSpan(`${options.table}.findByIds`)
       )
+
+    /** `findById` within the tenant: another tenant's row is a `NoSuchElementError`. */
+    const findIn = (
+      id: RowId,
+      v: Current
+    ): Effect.Effect<Row, Cause.NoSuchElementError | SqlError.SqlError | Schema.SchemaError> =>
+      v === undefined
+        ? base.findById(id) as Effect.Effect<Row, Cause.NoSuchElementError | SqlError.SqlError | Schema.SchemaError>
+        : Effect.gen(function*() {
+          const encoded = yield* encodeId(id)
+          const rows = yield* decodeRows(
+            yield* sql`SELECT * FROM ${table} WHERE ${sql.and([sql`${sql(options.idColumn)} = ${encoded as string | number}`, ...inScope(v)])}`
+          )
+          const row = rows[0]
+          return row === undefined ? yield* Effect.fail(new Cause.NoSuchElementError()) : row
+        }).pipe(Effect.withSpan(`${options.table}.findById`))
+    const findById = (id: RowId) => Effect.flatMap(tenant, (v) => findIn(id, v))
 
     // --- changes -------------------------------------------------------------
     // Reactivity handlers take no arguments, so the change rides along as the
@@ -182,10 +264,10 @@ export const make = <
     const encodeChange = Schema.encodeSync(ChangeJson)
     const decodeChange = Schema.decodeUnknownOption(ChangeJson)
 
-    const announce = (change: Change<RowId>) =>
+    const announce = (change: Change<RowId>, v: Current) =>
       Effect.sync(() => {
         const payload: Schema.Json = encodeChange({ table: options.table, change })
-        payloads.invalidateUnsafe({ [options.table]: [change.id] }, payload)
+        payloads.invalidateUnsafe({ [keyFor(v)]: [change.id] }, payload)
       })
 
     /** Why this table's key was invalidated, from the current payload (local or remote). */
@@ -206,7 +288,13 @@ export const make = <
       })
 
     const insert = (value: S["insert"]["Type"]) =>
-      Effect.tap(base.insert(value), (row: Row) => announce({ _tag: "Insert", id: idOf(row) }))
+      Effect.gen(function*() {
+        const v = yield* tenant
+        yield* checkReferences(value, v)
+        const row: Row = yield* base.insert(withTenant(value, v))
+        yield* announce({ _tag: "Insert", id: idOf(row) }, v)
+        return row
+      })
 
     /**
      * Open live streams on this table. Without any, there is nobody to diff
@@ -221,16 +309,28 @@ export const make = <
         // changes still cover every column that changed (if a column differs
         // between its version and ours, it differs from the one we read in at
         // least one of them), and streams act on both.
+        // With a scope the previous version is always read: it also proves the
+        // row is in the tenant (the tenant column never changes: writes set it).
+        const v = yield* tenant
         const id: RowId = value[options.idColumn]
-        const before = watchers === 0 && !payloads.crossProcess
+        const before = v !== undefined
+          ? yield* findIn(id, v)
+          : watchers === 0 && !payloads.crossProcess
           ? undefined
           : yield* base.findById(id).pipe(Effect.catchTag("NoSuchElementError", () => Effect.succeed(undefined)))
-        const after = yield* base.update(value)
-        yield* announce({ _tag: "Update", id: idOf(after), columns: yield* changedColumns(before, after) })
+        yield* checkReferences(value, v)
+        const after = yield* base.update(withTenant(value, v))
+        yield* announce({ _tag: "Update", id: idOf(after), columns: yield* changedColumns(before, after) }, v)
         return after
       })
 
-    const remove = (id: RowId) => Effect.tap(base.delete(id), () => announce({ _tag: "Delete", id }))
+    const remove = (id: RowId) =>
+      Effect.gen(function*() {
+        const v = yield* tenant
+        if (v !== undefined) yield* findIn(id, v)
+        yield* base.delete(id)
+        yield* announce({ _tag: "Delete", id }, v)
+      })
 
     // --- live ----------------------------------------------------------------
 
@@ -243,8 +343,11 @@ export const make = <
             Effect.sync(() => reactivity.registerUnsafe(keys, () => Queue.offerUnsafe(signals, signal()))),
             (cancel) => Effect.sync(cancel)
           )
-        // Registered before the first query, so no change can slip in between.
-        yield* register([options.table], tableSignal)
+        const v = yield* tenant
+        // Registered before the first query, so no change can slip in between. The
+        // bare table key also catches invalidations from outside the repo.
+        const key = keyFor(v)
+        yield* register(key === options.table ? [key] : [key, options.table], tableSignal)
         const dependsOn = liveOptions?.dependsOn ?? []
         if (dependsOn.length > 0) yield* register(dependsOn, () => ({ _tag: "Dependency" }))
 
@@ -252,7 +355,7 @@ export const make = <
         let current: Page<Row> | undefined
 
         const requery = (reason: "initial" | "table" | "dependency") =>
-          Effect.map(list(q), (page): ReadonlyArray<LiveEvent<Row>> => {
+          Effect.map(listIn(q, v), (page): ReadonlyArray<LiveEvent<Row>> => {
             current = page
             return [{ _tag: "Page", page, reason }]
           })
@@ -267,7 +370,7 @@ export const make = <
               case "Requery":
                 return yield* requery(next.reason)
               case "Rows": {
-                const fetched = yield* findByIds(next.ids)
+                const fetched = yield* findByIds(next.ids, v)
                 const [first, ...rest] = fetched
                 // A row that vanished (deleted meanwhile): the page needs a full re-query.
                 if (first === undefined || fetched.length !== next.ids.length) return yield* requery("table")
@@ -286,6 +389,6 @@ export const make = <
       }))
 
     // The model is constrained to need no services, which TS cannot see through the generic.
-    const repo = { findById: base.findById, list, live, insert, update, delete: remove }
-    return repo as unknown as Repo<S, Id, Sortable, FK>
+    const repo = { findById, list, live, insert, update, delete: remove, key: Effect.map(tenant, keyFor) }
+    return repo as unknown as Repo<S, Id, Sortable, FK, R>
   })
