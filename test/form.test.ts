@@ -12,12 +12,14 @@ describe("Form", () => {
       ["email", "email", "Email"],
       ["role", "select", "Role"],
       ["teamId", "select", "Team"],
-      ["active", "checkbox", "Active"]
+      ["active", "checkbox", "Active"],
+      // The tenant: in the model, but `Resource` leaves it out of every form (see `crud/Scope.ts`).
+      ["orgId", "number", "Organization"]
     ])
   })
 
   it("blank drafts use \"\" (never null) and the first enum member", () => {
-    expect(Form.blankDraft(User.jsonCreate)).toEqual({ id: "", name: "", email: "", role: "admin", teamId: "", active: false })
+    expect(Form.blankDraft(User.jsonCreate)).toEqual({ id: "", name: "", email: "", role: "admin", teamId: "", active: false, orgId: "" })
   })
 
   it.effect("decode coerces input strings: \"\" -> null, \"3\" -> 3, and trims", () =>
@@ -27,9 +29,10 @@ describe("Form", () => {
         email: "ada@example.com",
         role: "member",
         teamId: "3",
-        active: true
+        active: true,
+        orgId: "1"
       })
-      expect(value).toEqual({ name: "Ada", email: "ada@example.com", role: "member", teamId: 3, active: true })
+      expect(value).toEqual({ name: "Ada", email: "ada@example.com", role: "member", teamId: 3, active: true, orgId: 1 })
       const noTeam = yield* Form.decode(User.jsonCreate, { ...value, teamId: "" })
       expect(noTeam.teamId).toBeNull()
     }))
@@ -59,6 +62,7 @@ describe("Form", () => {
       role: "admin",
       teamId: null,
       active: true,
+      orgId: 1 as any,
       createdAt: DateTime.makeUnsafe(0)
     })
     expect(Form.toDraft(User.jsonUpdate, user, user.id)).toEqual({
@@ -67,7 +71,8 @@ describe("Form", () => {
       email: "ada@example.com",
       role: "admin",
       teamId: "",
-      active: true
+      active: true,
+      orgId: 1
     })
     expect(Form.toDraft(User.jsonUpdate, User.make({ ...user, teamId: 4 as any }), 1).teamId).toBe("4")
   })

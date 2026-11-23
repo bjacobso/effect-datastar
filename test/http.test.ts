@@ -1,6 +1,7 @@
 /**
  * The real routes, in-process, against a seeded in-memory database
- * (87 users, 5 teams, every 6th user without a team).
+ * (87 users, 5 teams, every 6th user without a team), signed in as Acme:
+ * 52 of the users (7 without a team) and teams 1-3.
  */
 import { describe, expect, it } from "vitest"
 import { decode, initialSignals, makeApp, rowNames, userDraft, usersQuery, type Event } from "./support.ts"
@@ -32,7 +33,7 @@ describe("pages", () => {
     const html = await app.page("/users")
     expect(html).toContain("<!doctype html>")
     expect(decode(html)).toContain(`data-init="@get('/users/view'`)
-    expect(total(html)).toBe(87)
+    expect(total(html)).toBe(52)
     expect(rowNames(html)).toHaveLength(10)
     expect(html).toContain(`<option value="2">Growth</option>`)
     expect(initialSignals(html).users.query).toEqual(usersQuery().users.query)
@@ -40,7 +41,7 @@ describe("pages", () => {
 
   it("renders the query from the URL into the table and the signals", async () => {
     const html = await app.page("/users?teamId=null&sort=name&dir=asc&pageSize=25")
-    expect(total(html)).toBe(14)
+    expect(total(html)).toBe(7)
     const names = rowNames(html)
     expect([...names].sort((a, b) => a!.localeCompare(b!))).toEqual(names)
     expect(initialSignals(html).users.query).toEqual(
@@ -50,19 +51,19 @@ describe("pages", () => {
 
   it("clamps an out-of-range page from the URL", async () => {
     const html = await app.page("/users?page=99")
-    expect(html).toContain("Page 9 of 9")
-    expect(initialSignals(html).users.query.page).toBe(9)
+    expect(html).toContain("Page 6 of 6")
+    expect(initialSignals(html).users.query.page).toBe(6)
   })
 
   it("falls back to defaults for invalid URL params", async () => {
     const html = await app.page("/users?sort=password&role=root")
-    expect(total(html)).toBe(87)
+    expect(total(html)).toBe(52)
     expect(initialSignals(html).users.query).toEqual(usersQuery().users.query)
   })
 
   it.each(["1.5", "abc"])("ignores a teamId filter the column's schema rejects (%s)", async (teamId) => {
     const html = await app.page(`/users?teamId=${teamId}`)
-    expect(total(html)).toBe(87)
+    expect(total(html)).toBe(52)
     expect(initialSignals(html).users.query).toEqual(usersQuery().users.query)
   })
 })
@@ -72,9 +73,9 @@ describe("users live view", () => {
     const s = await view(usersQuery())
     await s.close()
     const html = table(s.first)
-    expect(total(html)).toBe(87)
+    expect(total(html)).toBe(52)
     expect(rowNames(html)).toHaveLength(10)
-    expect(html).toContain("Page 1 of 9")
+    expect(html).toContain("Page 1 of 6")
     const selects = s.first.filter((e) => e.type === "patch-elements" && e.mode === "replace" && e.selector !== "#toast")
     expect(selects.map((e) => (e as any).selector)).toEqual(["#users-filter-teamId", "#users-field-teamId"])
     expect((selects[0] as any).elements).toContain(">Growth</option>")
@@ -83,7 +84,7 @@ describe("users live view", () => {
   it("filters by relation, including IS NULL", async () => {
     const none = await view(usersQuery({}, { teamId: "null" }))
     await none.close()
-    expect(total(table(none.first))).toBe(14)
+    expect(total(table(none.first))).toBe(7)
     expect(table(none.first)).not.toContain("Growth")
   })
 
@@ -93,7 +94,7 @@ describe("users live view", () => {
     const names = rowNames(table(s.first))
     expect(names).toHaveLength(25)
     expect([...names].sort((a, b) => a!.localeCompare(b!))).toEqual(names)
-    expect(table(s.first)).toContain("Page 2 of 4")
+    expect(table(s.first)).toContain("Page 2 of 3")
   })
 
   it("sends the canonical URL once per stream", async () => {
@@ -105,7 +106,7 @@ describe("users live view", () => {
   it("clamps an out-of-range page by patching the query signal", async () => {
     const s = await view(usersQuery({ page: 99 }), hasAny)
     await s.close()
-    expect(signals(s.first)).toEqual([{ users: { query: { page: 9 } } }])
+    expect(signals(s.first)).toEqual([{ users: { query: { page: 6 } } }])
   })
 
   it("rejects an invalid query with an error toast", async () => {

@@ -36,8 +36,9 @@ describe("SQL statements per mutation", () => {
       sqlLog.reset()
       await run()
       await Promise.all(streams.map((s) => s.collect(250)))
-      // Leave out the cross-process broadcast (one INSERT per mutation, plus timing-dependent polls).
-      const statements = sqlLog.statements.filter((s) => !/reactivity_invalidations|PRAGMA data_version/.test(s))
+      // Leave out the cross-process broadcast (one INSERT per mutation, plus timing-dependent polls)
+      // and the session lookup every request makes (one SELECT).
+      const statements = sqlLog.statements.filter((s) => !/reactivity_invalidations|PRAGMA data_version|FROM sessions/.test(s))
       const kinds = statements.map((s) => s.trim().split(/\s+/).slice(0, 3).join(" "))
       const counts = new Map<string, number>()
       for (const k of kinds) counts.set(k, (counts.get(k) ?? 0) + 1)
@@ -62,21 +63,25 @@ describe("SQL statements per mutation", () => {
     await measure("rename team", () => app.action("PUT", "/teams/2", { teams: { draft: { id: 2, name: "Growth Eng" } } }))
 
     await Promise.all(streams.map((s) => s.close()))
+    // Users and teams are tenant-scoped: reading the previous version is also the
+    // "is it in my organization" check, and a user's team is checked to be in the
+    // organization too (`SELECT 1 FROM teams`, when the draft has a team).
     expect(Object.fromEntries(results.map((r) => [r.mutation, r.statements]))).toEqual({
-      // read previous version + update + row re-fetch (page 1) + name-sorted view re-query (2)
-      "rename visible user": 5,
-      // read previous version + update; no view can show the row
-      "toggle active, off-page user": 2,
-      // read previous version + update + row re-fetch (page 1)
-      "change email, visible user": 3,
-      // read previous version + update + row re-fetch (page 1) + role-filtered view re-query (2)
-      "change role (filtered col)": 5,
-      // mutation + page query and COUNT per view
+      // read previous version + team check + update + row re-fetch (page 1) + name-sorted view re-query (2)
+      "rename visible user": 6,
+      // read previous version + team check + update; no view can show the row
+      "toggle active, off-page user": 3,
+      // read previous version + team check + update + row re-fetch (page 1)
+      "change email, visible user": 4,
+      // read previous version + team check + update + row re-fetch (page 1) + role-filtered view re-query (2)
+      "change role (filtered col)": 6,
+      // mutation (no team) + page query and COUNT per view
       "insert": 13,
-      "delete": 13,
+      // tenant check + delete + page query and COUNT per view
+      "delete": 14,
       // read previous version + update + page query, COUNT and team lookup per view. No teams
-      // view is open here, but the previous version is read anyway: views in other
-      // processes may need the changed columns (they travel with the broadcast).
+      // view is open here, but the previous version is read anyway: it is the tenant check,
+      // and views in other processes may need the changed columns (they travel with the broadcast).
       "rename team": 20
     })
   })

@@ -209,24 +209,24 @@ describe("editing on the detail page", () => {
   })
 
   it("edits through the dialog, with validation, and the live record follows", async () => {
-    const s = await app.stream("/teams/4/view", {})
+    const s = await app.stream("/teams/3/view", {})
     await s.until((e) => elements(e, "teams-record") !== "")
-    const edit = await app.action("GET", "/teams/4/edit")
-    expect(signals(edit.events)[0].teams).toMatchObject({ dialog: true, draft: { id: 4 } })
+    const edit = await app.action("GET", "/teams/3/edit")
+    expect(signals(edit.events)[0].teams).toMatchObject({ dialog: true, draft: { id: 3 } })
     const name = signals(edit.events)[0].teams.draft.name
 
-    const invalid = await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name: " " } } })
+    const invalid = await app.action("PUT", "/teams/3", { teams: { draft: { id: 3, name: " " } } })
     expect(signals(invalid.events)[0].teams.errors).toEqual({ name: "Name is required" })
-    const taken = await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name: "Growth" } } })
+    const taken = await app.action("PUT", "/teams/3", { teams: { draft: { id: 3, name: "Growth" } } })
     expect(signals(taken.events)[0].teams.errors).toEqual({ name: "A team with that name already exists" })
 
-    const saved = await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name: "Renamed Here" } } })
+    const saved = await app.action("PUT", "/teams/3", { teams: { draft: { id: 3, name: "Renamed Here" } } })
     expect(toasts(saved.events)).toEqual(["Saved Renamed Here"])
     expect(signals(saved.events)[0].teams).toMatchObject({ dialog: false })
     const next = await s.until((e) => elements(e, "teams-record").includes("Renamed Here"))
     await s.close()
-    expect(decode(elements(next, "teams-record"))).toContain(`@delete('/teams/4?from=detail'`)
-    await app.action("PUT", "/teams/4", { teams: { draft: { id: 4, name } } })
+    expect(decode(elements(next, "teams-record"))).toContain(`@delete('/teams/3?from=detail'`)
+    await app.action("PUT", "/teams/3", { teams: { draft: { id: 3, name } } })
   })
 
   it("delete goes back to the list; a restricted delete stays, with a toast", async () => {

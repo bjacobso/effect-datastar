@@ -1,7 +1,8 @@
 /**
  * Fine-grained live updates: which mutations patch a single row, which re-render
  * the whole table, and which are skipped. Seeded in-memory database: 87 users
- * (user 87 is the newest, so the first row of the default list), 5 teams.
+ * (user 87 is the newest, so the first row of the default list), 5 teams, signed
+ * in as Acme (52 of the users, teams 1-3).
  */
 import { describe, expect, it } from "vitest"
 import * as Repo from "../src/crud/Repo.ts"
@@ -121,8 +122,8 @@ describe("users live view, per change", () => {
 
   it("skips updates to off-page rows that can't enter the page", async () => {
     const s = await open(usersQuery())
-    expect(s.first).not.toContain(`<tr id="users-3"`)
-    await save(3, { name: "Not Shown", active: false })
+    expect(s.first).not.toContain(`<tr id="users-1"`)
+    await save(1, { name: "Not Shown", active: false })
     const events = await s.collect(200)
     await s.close()
     expect(events).toEqual([])
@@ -149,7 +150,7 @@ describe("users live view, per change", () => {
   })
 
   it("re-renders the table, with the new count, on delete", async () => {
-    const s = await open(usersQuery({ page: 9 }))
+    const s = await open(usersQuery({ page: 6 }))
     const before = total(s.first)
     const target = Number(/<tr id="users-(\d+)"/.exec(s.first)![1])
     await app.action("DELETE", `/users/${target}`)
