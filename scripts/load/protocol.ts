@@ -64,8 +64,10 @@ export interface WorkerReport {
   readonly sameLatency: ReadonlyArray<number>
   readonly expected: number
   readonly delivered: number
-  /** Expected but skipped for a later write to the same row (coalescing). */
+  /** Expected, but another write to the same row showed up instead (concurrent writes, coalescing). */
   readonly superseded: number
+  /** Expected, but a concurrent write moved the row off the page first. */
+  readonly moved: number
   readonly misses: number
   readonly missSamples: ReadonlyArray<string>
   /** Tags of another organization seen by a client: must be 0. */

@@ -91,7 +91,7 @@ const handleEvent = (c: Client, block: string) => {
   if (c.spec.kind === "list" && block.includes(`id="${c.spec.ns}-table"`)) {
     const next = new Set<number>()
     for (const m of block.matchAll(ROW)) if (m[1] === c.spec.ns) next.add(Number(m[2]))
-    for (const id of c.visible) if (!next.has(id) && !c.vanished.has(id)) c.vanished.set(id, t)
+    for (const id of c.visible) if (!next.has(id)) c.vanished.set(id, t)
     c.visible = next
   }
 }
@@ -219,16 +219,18 @@ const report = (): WorkerReport => {
   let expected = 0
   let delivered = 0
   let superseded = 0
+  let moved = 0
   const missSamples: Array<string> = []
   let misses = 0
-  // Later writes to the same row, for "superseded": a coalescing server may skip straight to the latest.
-  const laterSeqs = new Map<number, Array<number>>()
+  // Updates per row, for "superseded": concurrent writes to one row may land in either order,
+  // and a coalescing server may skip straight to the latest.
+  const rowSeqs = new Map<number, Array<number>>()
   for (const d of descriptors) {
     if (d.kind !== "update") continue
     const id = d.ids[0]!
-    const list = laterSeqs.get(id) ?? []
+    const list = rowSeqs.get(id) ?? []
     list.push(d.seq)
-    laterSeqs.set(id, list)
+    rowSeqs.set(id, list)
   }
   for (const d of descriptors) {
     const expectedClients = expectations.get(d.seq) ?? []
@@ -247,8 +249,14 @@ const report = (): WorkerReport => {
         else sameLatency.push(ms)
         continue
       }
-      if (d.kind === "update" && (laterSeqs.get(d.ids[0]!) ?? []).some((s) => s > d.seq && c.seen.has(s))) {
+      if (d.kind === "update" && (rowSeqs.get(d.ids[0]!) ?? []).some((s) => s !== d.seq && (c.seen.get(s) ?? -Infinity) >= d.sent - 50)) {
         superseded++
+        continue
+      }
+      // A concurrent write moved the row off this page (an insert pushed it to the next
+      // page, a bulk role change took it out of a role filter): not a miss.
+      if (d.kind === "update" && c.spec.kind === "list" && !c.visible.has(d.ids[0]!)) {
+        moved++
         continue
       }
       misses++
@@ -271,6 +279,7 @@ const report = (): WorkerReport => {
     expected,
     delivered,
     superseded,
+    moved,
     misses,
     missSamples,
     leaks,

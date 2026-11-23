@@ -493,11 +493,13 @@ const program = Effect.gen(function*() {
       }
       case "bulk": {
         const rows = Array.from({ length: 5 }, () => pick(org.hot.slice(0, 20)))
-        ids = [...new Set(rows.map((row) => row["id"] as number))]
+        const selection = [...new Set(rows.map((row) => row["id"] as number))]
         const role = s % 2 === 0 ? "admin" : "member"
+        // Only rows whose role actually changes are expected to re-render.
+        ids = [...new Set(rows.filter((row) => row["role"] !== role).map((row) => row["id"] as number))]
         for (const row of rows) row["role"] = role
         column = "role"
-        yield* api(port, cookie, "POST", "/users/bulk/update", { users: { selection: ids, bulk: { field: "role", value: role } } })
+        yield* api(port, cookie, "POST", "/users/bulk/update", { users: { selection, bulk: { field: "role", value: role } } })
         break
       }
       case "team": {
@@ -684,6 +686,7 @@ const program = Effect.gen(function*() {
       expected: sum((r) => r.expected),
       delivered: sum((r) => r.delivered),
       superseded: sum((r) => r.superseded),
+      moved: sum((r) => r.moved),
       misses: sum((r) => r.misses),
       missSamples: reports.flatMap((r) => r.missSamples).slice(0, 10),
       crossOrgLeaks: sum((r) => r.leaks),
