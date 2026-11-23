@@ -28,7 +28,9 @@ export const counters = {
   renderMs: 0,
   /** Live list work: page re-queries and row re-fetches. */
   requeries: 0,
-  refetches: 0
+  refetches: 0,
+  /** Shared live views running (see `Datastar/Shared.ts`): one per distinct view, however many tabs show it. */
+  sharedViews: 0
 }
 
 /** Whether `install` ran: the timers are on. */

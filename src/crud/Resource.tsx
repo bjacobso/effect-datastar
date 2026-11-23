@@ -73,6 +73,7 @@ import * as Form from "./Form.ts"
 import * as Lookup from "./Lookup.ts"
 import * as Query from "./Query.ts"
 import * as Repo from "./Repo.ts"
+import * as Shared from "../datastar/Shared.ts"
 import type * as Scope from "./Scope.ts"
 import * as UrlState from "./UrlState.ts"
 
@@ -698,15 +699,67 @@ export const define = <
           const services = yield* relationServices
           const q = yield* readQuery
           const full = options.full(q, lock)
+          // Identical views share one source (see `Shared`): the same tenant, lock and query.
+          // The source runs with this request's tenant service only, so it doesn't hold on to
+          // the request, and a view of another tenant never shares it (its key differs).
+          const tenantKey = scope === undefined ? null : (yield* scope.value).encoded
+          const key = JSON.stringify([tenantKey, lock ?? null, q])
+          const tenantOnly = tenant === undefined
+            ? Context.empty()
+            : Context.pick(tenant.service)(yield* Effect.context<T>())
+          const source = sharedSource(repo, services, q, full, lock).pipe(
+            Effect.provideContext(tenantOnly as Context.Context<T>)
+          )
+          return Shared.subscribe(hubs, key, source)
+        })).pipe(Stream.catch((error) => Stream.fromEffect(unexpected(error))))
+
+      /** Shared live tables, by tenant, lock and query. */
+      const hubs = Shared.registry()
+
+      /**
+       * What every tab showing this table for this query and tenant receives: the
+       * live page, rendered once. Its snapshot is the table as it is now (the page
+       * with any row patches applied), all relation selects and the page's ids.
+       */
+      const sharedSource = (
+        repo: Repo.Repo<M, Id, Sortable, FK, T>,
+        services: ReadonlyArray<readonly [string, Lookup.Lookup<T>]>,
+        q: Q,
+        full: Query.ListQuery<Sortable, FK>,
+        lock: Lock
+      ): Effect.Effect<Shared.Source, never, T> =>
+        Effect.gen(function*() {
+          const context = yield* Effect.context<T>()
           let lookups: Components.Lookups = {}
           const lastOptions = new Map<string, string>()
-          /** The table as last sent (`undefined` once rows were patched since). */
+          /** The table as last rendered (`undefined` once rows were patched since). */
           let lastTable: string | undefined
-          let urlSent = false
+          /** The current page (with row patches applied), or the page to clamp to. */
+          let current: Repo.Page<Row> | undefined
+          let clamp: number | undefined
+          const snapshots: Record<"plain" | "first", ReadonlyArray<Datastar.DatastarEvent> | undefined> = { plain: undefined, first: undefined }
+          const snapshot = (first: boolean): ReadonlyArray<Datastar.DatastarEvent> | undefined => {
+            const cached = first ? snapshots.first : snapshots.plain
+            if (cached !== undefined) return cached
+            if (clamp !== undefined) return [Datastar.patchSignals({ [ns]: { query: { page: clamp } } })]
+            if (current === undefined) return undefined
+            lastTable ??= render(<TableView page={current} current={q} lookups={lookups} lock={lock} />)
+            // The ids on this page, for "select all" and pruning the selection (see `Bulk`),
+            // and for a new tab the canonical URL (see `UrlState`).
+            const local: Record<string, unknown> = { _page: pageIds(current.rows) }
+            if (first && options.syncUrl) local["_url"] = urlFor(full)
+            const events = [
+              Datastar.patchElements(lastTable),
+              ...relationSelects(lookups),
+              Datastar.patchSignals({ [ns]: local })
+            ]
+            snapshots[first ? "first" : "plain"] = events
+            return events
+          }
           // The related tables' keys, for the current tenant (`tags[orgId=1]`): another
           // organization's tag changes don't wake this view.
           const dependsOn = yield* Effect.forEach(services, ([, l]) => l.key)
-          return repo.live(full, { dependsOn }).pipe(
+          const deltas = repo.live(full, { dependsOn }).pipe(
             // Lookups load with the first page and whenever a related table changes (only
             // the changed tables' lookups, when the repo can tell).
             Stream.mapEffect((event): Effect.Effect<Repo.LiveEvent<Row>, SqlError.SqlError, T> =>
@@ -722,8 +775,14 @@ export const define = <
                 })
                 : Effect.succeed(event)
             ),
-            Stream.map((event): Events => {
+            // Deltas, for tabs that are up to date. The state is updated first, so a tab
+            // that joins (or catches up) gets a snapshot that includes this change.
+            Stream.map((event): ReadonlyArray<Datastar.DatastarEvent> => {
+              snapshots.plain = undefined
+              snapshots.first = undefined
               if (event._tag === "Rows") {
+                const byId = new Map(event.rows.map((row) => [row[idColumn], row] as const))
+                if (current) current = { ...current, rows: current.rows.map((row) => byId.get(row[idColumn]) ?? row) }
                 lastTable = undefined
                 // Only these rows changed, in ways that can't move them: patch each `<tr>` by id.
                 return event.rows.map((row) => Datastar.patchElements(render(<RowView row={row} lookups={lookups} lock={lock} />)))
@@ -731,8 +790,11 @@ export const define = <
               const page = event.page
               if (page.page > page.pages) {
                 // Out of range (e.g. after deleting the last row on the last page): clamp.
-                return Datastar.patchSignals({ [ns]: { query: { page: page.pages } } })
+                clamp = page.pages
+                return [Datastar.patchSignals({ [ns]: { query: { page: page.pages } } })]
               }
+              clamp = undefined
+              current = page
               const table = render(<TableView page={page} current={q} lookups={lookups} lock={lock} />)
               // A related row changed (a renamed tag): the page is the same, so only a table
               // that shows it renders differently. Others send nothing (but their selects).
@@ -742,20 +804,16 @@ export const define = <
               const changed = new Set(Object.keys(lookups).filter((k) => JSON.stringify(lookups[k]) !== lastOptions.get(k)))
               for (const k of changed) lastOptions.set(k, JSON.stringify(lookups[k]))
               if (changed.size > 0) events.push(...relationSelects(lookups, changed))
-              // Same page, same table: the ids and URL are as already sent.
+              // Same page, same table: the ids are as already sent.
               if (event._tag === "Related" && events.length === 0) return events
-              // The ids on this page, for "select all" and pruning the selection (see `Bulk`),
-              // and once per stream the canonical URL (see `UrlState`).
-              const local: Record<string, unknown> = { _page: pageIds(page.rows) }
-              if (options.syncUrl && !urlSent) {
-                urlSent = true
-                local["_url"] = urlFor(full)
-              }
-              events.push(Datastar.patchSignals({ [ns]: local }))
+              events.push(Datastar.patchSignals({ [ns]: { _page: pageIds(page.rows) } }))
               return events
-            })
+            }),
+            Stream.provideContext(context),
+            Stream.catch((error) => Stream.fromEffect(Effect.map(unexpected(error), (e) => [e])))
           )
-        })).pipe(Stream.catch((error) => Stream.fromEffect(unexpected(error))))
+          return { deltas, snapshot }
+        })
 
       const save = (id: IdType | undefined, lock: Lock) =>
         Effect.gen(function*() {

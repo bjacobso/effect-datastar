@@ -68,8 +68,9 @@ export const patchSignals = (signals: unknown, options?: { readonly onlyIfMissin
 const dataLines = (prefix: string, value: string) => value.split("\n").map((line) => `data: ${prefix} ${line}\n`)
 
 /** Encode one event in the Datastar SSE wire format. */
-export const encodeEvent = (event: DatastarEvent): Effect.Effect<string> =>
-  Effect.sync(() => {
+export const encodeEvent = (event: DatastarEvent): Effect.Effect<string> => Effect.sync(() => encodeEventSync(event))
+
+const encodeEventSync = (event: DatastarEvent): string => {
     switch (event._tag) {
       case "PatchElements": {
         const html = event.elements
@@ -87,9 +88,35 @@ export const encodeEvent = (event: DatastarEvent): Effect.Effect<string> =>
         return lines.join("") + "\n"
       }
     }
-  })
+  }
 
 const encoder = new TextEncoder()
+
+/**
+ * Event bytes, encoded once per event object: a shared live view (`Shared`) hands
+ * the same event objects to every tab that shows it.
+ */
+const encoded = new WeakMap<DatastarEvent, Uint8Array>()
+const bytesOf = (event: DatastarEvent) => {
+  let bytes = encoded.get(event)
+  if (bytes === undefined) {
+    bytes = encoder.encode(encodeEventSync(event))
+    encoded.set(event, bytes)
+  }
+  return bytes
+}
+/** A batch of events as one chunk (one socket write). */
+const batchBytes = (events: ReadonlyArray<DatastarEvent>): Uint8Array => {
+  if (events.length === 1) return bytesOf(events[0]!)
+  const parts = events.map(bytesOf)
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0))
+  let offset = 0
+  for (const p of parts) {
+    out.set(p, offset)
+    offset += p.byteLength
+  }
+  return out
+}
 
 export type Events = DatastarEvent | ReadonlyArray<DatastarEvent>
 
@@ -103,14 +130,14 @@ export const respond = <R>(
   events: Effect.Effect<Events, never, R> | Stream.Stream<Events, never, R>
 ): Effect.Effect<HttpServerResponse.HttpServerResponse, never, R> =>
   Effect.map(Effect.context<R>(), (context) => {
-    const stream: Stream.Stream<DatastarEvent, never, R> = Stream.isStream(events)
-      ? Stream.flattenIterable(Stream.map(events, toArray))
-      : Stream.fromIterableEffect(Effect.map(events, toArray))
+    const stream: Stream.Stream<ReadonlyArray<DatastarEvent>, never, R> = Stream.isStream(events)
+      ? Stream.map(events, toArray)
+      : Stream.fromEffect(Effect.map(events, toArray))
     const encoded = stream.pipe(
-      Stream.mapEffect(encodeEvent),
-      Stream.map((s) => {
-        const bytes = encoder.encode(s)
-        counters.sseEvents++
+      Stream.filter((batch) => batch.length > 0),
+      Stream.map((batch) => {
+        const bytes = batchBytes(batch)
+        counters.sseEvents += batch.length
         counters.sseBytes += bytes.byteLength
         return bytes
       }),
