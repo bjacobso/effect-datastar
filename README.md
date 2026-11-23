@@ -8,6 +8,7 @@ npm run dev        # build in watch mode and (re)start the server: http://localh
 npm start          # production build, then node dist/server.js
 npm test           # unit + HTTP tests (in-process, in-memory SQLite)
 npm run test:e2e   # browser tests (builds once, real server + Playwright Chromium)
+npm run load -- --streams 1000 --rate 5   # load test of live views (after npm run build), see docs/load.md
 ```
 
 Requires Node 24+ (uses `node:sqlite`). For the browser tests, run `npx playwright install chromium` once.
@@ -332,7 +333,8 @@ from an earlier version: `0001_users`, `0002_teams`, `0003_orgs` (organizations;
 teams and users rebuilt with `orgId`, per-organization uniqueness and the
 `(teamId, orgId)` key; existing rows go to Acme), `0004_auth` (accounts and
 sessions), `0005_dates_text_tags` (`users.startDate`, `teams.description`,
-per-organization `tags` and `user_tags` with composite keys). Tags come after
+per-organization `tags` and `user_tags` with composite keys), `0006_list_indexes`
+(`(orgId, column)` for every sortable column: list pages read just the page). Tags come after
 organizations, so they are per organization from their first migration. The
 seed fills what is empty: Globex is added to a database that only had Acme,
 and tags (each organization's own) to one that had none.
@@ -378,6 +380,7 @@ in as Acme, see nothing of Globex, sign out).
   - `Endpoint.ts`: route plus typed client action (`remove.call({ id })` produces `@delete('/users/3')`), with an optional param-free path prefix and search params
   - `Html.ts`: React element to HTML string (`render` for patches, `document` for pages)
   - `Flash.ts`: a toast carried across a redirect in a short-lived cookie
+  - `Shared.ts`: live views shared by every tab that shows the same thing (snapshot, deltas, bounded buffering)
 - `src/crud/`: building blocks derived from a schema
   - `Resource.tsx`: composes everything below into resources (`define`, then `app`)
   - `Query.ts`: query signals schema, SQL `WHERE` / `ORDER BY`, URL params
@@ -395,8 +398,10 @@ in as Acme, see nothing of Globex, sign out).
 - `src/ui/`: the design system, copied from `@dw/ui` (document-workflow-service `packages/ui`): StyleX tokens and themes (`theme/`), global CSS and fonts, Button, form styles, the ui-sdk Textarea, Select (`form-pickers.tsx`), Combobox (`form-combobox.tsx`), DatePicker (`form-date.tsx`), Dialog (`overlay.tsx`), Menu, display pieces and icons
 - `src/islands/`: React islands inside Datastar pages (`Island.tsx`: the `<ds-island>` host; `select.tsx`, `date.tsx`, `multiselect.tsx`, `dialog.tsx`, `theme.tsx`: the islands, gathered in `islands.tsx`; `client.tsx`: the browser entry; `loaders.ts`, `mount.tsx`: the code it loads on demand)
 - `src/reactivity/`: `Reactivity` across processes (`Broadcast`, `DistributedReactivity`, `SqliteBroadcast`), and `Payload.ts` for invalidations that say what changed
+- `src/metrics/Metrics.ts`: counters, memory, CPU and event-loop delay for load tests (`GET /_metrics` with `METRICS=1`)
 - `src/app/`: the `users`, `teams` and `tags` definitions (all tenant-scoped by `orgId`), the `Org` model, their assembly with the relations and the team page's members (`Resources.ts`), the JSON API (`Api.ts`), migrations and seed (`Db.ts`), the sign-in page (`Login.tsx`), the layout (`Layout.tsx`) and app composition (`App.tsx`)
 - `scripts/build.ts`: the esbuild + StyleX build (`npm run build`, `npm run dev`)
+- `scripts/load/`: the load harness (`npm run load`, see [docs/load.md](docs/load.md))
 - `test/`: unit, in-process HTTP, and browser (`test/e2e`) tests
 
 ## Stack
@@ -704,6 +709,26 @@ between was assigned, so fewer rows than ids means some were pruned. The
 subscription then delivers a `Gap`, and `DistributedReactivity` re-runs every
 key registered in that process (it tracks `registerUnsafe`, `query` and
 `stream` registrations), so every live view re-queries.
+
+### Shared views, and how many tabs it takes
+
+Identical live views share their work (`src/datastar/Shared.ts`): every tab
+showing the same table (same organization, embed lock and query) or the same
+record gets the events of one shared source, which runs the query and renders
+once per change. A tab starts from the source's snapshot (so joining a running
+view costs no query), then gets its deltas; a tab that stops reading holds at
+most 16 pending events before it is switched to the snapshot. The key includes
+the organization, so sharing never crosses organizations. A re-query that
+renders the same table sends nothing, one that only changes the total sends just
+the pagination, and a live record wakes only for its own row
+(`users[orgId=1]:42`) and its related tables.
+
+How far that goes is measured by a load harness (`scripts/load/`, `SEED=load`,
+`METRICS=1` for `GET /_metrics`): one process holds 10,000 live streams with
+5 writes/s at a p50/p99 of 19/140 ms from a write's response to each tab's patch,
+about 37 KB of heap per stream. Results, scenarios (bursts, slow consumers, two
+processes, reconnect storms), the fixes and their before/after numbers, and what
+would come next: **[docs/load.md](docs/load.md)**.
 
 ## JSON API
 
