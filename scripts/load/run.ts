@@ -71,7 +71,9 @@ const { values: args } = parseArgs({
     profile: { type: "boolean", default: false },
     /** The server bundle to run (a copy of `dist/` lets you compare builds). */
     server: { type: "string", default: "dist/server.js" },
-    "keep-db": { type: "boolean", default: false }
+    "keep-db": { type: "boolean", default: false },
+    /** Reconnect storm: retry failed connects with full jitter (Datastar retries without it). */
+    jitter: { type: "boolean", default: false }
   }
 })
 const scenario = args.scenario as "steady" | "burst" | "slow" | "storm"
@@ -412,7 +414,10 @@ const program = Effect.gen(function*() {
   const sample = Effect.forEach(ports, (port, i) =>
     Effect.map(metrics(port), (s) => {
       samples[i]!.push({ ...s, phase: currentPhase })
-    }), { concurrency: "unbounded", discard: true })
+    }).pipe(
+      // A failed sample (e.g. ENOBUFS when stalled sockets exhaust the kernel's buffers) is skipped.
+      Effect.catchDefect((e) => Effect.sync(() => console.error(`metrics sample failed: ${String(e)}`)))
+    ), { concurrency: "unbounded", discard: true })
   // Before any tab: a GC'd baseline, so memory per stream is the difference.
   const baseline = yield* Effect.forEach(ports, (port) => metrics(port, true))
   // Idle: what the server does on its own (the invalidation poll), over 3 seconds.
@@ -585,7 +590,7 @@ const program = Effect.gen(function*() {
     const stormStart = now()
     const writer = yield* Effect.forkChild(steadyWrites(duration / 2))
     // Each worker drops all its tabs and reconnects them all at once.
-    const reports = yield* all({ type: "storm" }, "opened")
+    const reports = yield* all({ type: "storm", jitter: args.jitter === true }, "opened")
     const reconnected = now()
     yield* Fiber.join(writer)
     stormInfo = { reconnectSeconds: (reconnected - stormStart) / 1000, workers: reports.length }
@@ -680,7 +685,7 @@ const program = Effect.gen(function*() {
     machine: { cpu: cpus()[0]?.model, cores: cpus().length, memoryGB: Math.round(totalmem() / 2 ** 30), node: process.version },
     options: { streams, rate, duration, burst, burstConcurrency, writeOrgs, slow: slowFraction, servers: serverCount, workers: workers.length, orgs: orgCount },
     tabs: { total: streams, distinctViews: distinct, slow: specs.filter((s) => s.slow).length },
-    open: { seconds: openSeconds, connected: sum((r) => r.connected), failed: sum((r) => r.failed), failures: [...new Set(reports.flatMap((r) => r.failures))], ttfe: percentiles(merge((r) => r.ttfe)) },
+    open: { seconds: openSeconds, connected: sum((r) => r.connected), failed: sum((r) => r.failed), retries: sum((r) => r.retries), failures: [...new Set(reports.flatMap((r) => r.failures))], ttfe: percentiles(merge((r) => r.ttfe)) },
     writes: { total: totalWrites, errors: writeErrors, errorSamples, byKind: writes, seconds: writeSeconds, perSecond: Math.round((totalWrites / writeSeconds) * 10) / 10 },
     burst: burstInfo,
     storm: stormInfo,

@@ -46,6 +46,8 @@ interface Client {
   slow: boolean
   /** Bumped on every (re)connect, so a stale socket's events are ignored. */
   generation: number
+  /** Failed connects retried (reconnect storm). */
+  retries: number
 }
 
 const clients: Array<Client> = []
@@ -272,6 +274,7 @@ const report = (): WorkerReport => {
     clients: clients.length,
     connected: clients.filter((c) => c.firstEvent !== undefined && c.failed === undefined).length,
     failed: clients.filter((c) => c.failed !== undefined).length,
+    retries: clients.reduce((n, c) => n + c.retries, 0),
     failures: [...new Set(clients.flatMap((c) => (c.failed === undefined ? [] : [c.failed])))].slice(0, 5),
     ttfe: percentileInput(ttfe),
     latency,
@@ -308,7 +311,8 @@ port.on("message", async (message: ToWorker) => {
           bytes: 0,
           events: 0,
           slow: false,
-          generation: 0
+          generation: 0,
+          retries: 0
         })
       }
       port.postMessage({ type: "ready" })
@@ -332,8 +336,21 @@ port.on("message", async (message: ToWorker) => {
       break
     case "storm": {
       // Every tab drops its connection at once, then all reconnect at once.
+      // A failed connect is retried as Datastar retries a broken stream: after 1 s, doubling,
+      // at most 10 times. Time to first event counts from the storm, retries included.
+      const stormStart = now()
       for (const c of clients) kill(c)
-      await openAll(clients, clients.length)
+      await Promise.all(clients.map(async (c) => {
+        for (let attempt = 0; ; attempt++) {
+          await open(c)
+          if (c.failed === undefined || attempt >= 10) break
+          c.retries++
+          const delay = Math.min(30_000, 1000 * 2 ** attempt)
+          // With `jitter`, each tab waits a random 0-100% of the delay (full jitter) instead of all at once.
+          await new Promise((r) => setTimeout(r, message.jitter ? Math.random() * delay : delay))
+        }
+        c.opening = stormStart
+      }))
       port.postMessage({ type: "opened" })
       break
     }

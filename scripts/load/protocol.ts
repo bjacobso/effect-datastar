@@ -46,7 +46,7 @@ export type ToWorker =
   | { readonly type: "open"; readonly concurrency: number }
   | { readonly type: "phase"; readonly phase: "setup" | "write" | "after" }
   | { readonly type: "desc"; readonly descriptors: ReadonlyArray<Descriptor> }
-  | { readonly type: "storm" }
+  | { readonly type: "storm"; readonly jitter: boolean }
   | { readonly type: "report" }
   | { readonly type: "close" }
 
@@ -55,6 +55,8 @@ export interface WorkerReport {
   readonly connected: number
   readonly failed: number
   readonly failures: ReadonlyArray<string>
+  /** Failed connects that were retried (reconnect storm). */
+  readonly retries: number
   /** Time to first event per client, ms. */
   readonly ttfe: ReadonlyArray<number>
   /** Mutation-to-patch latency per kind, ms, one sample per (expected client, mutation) delivered. */
