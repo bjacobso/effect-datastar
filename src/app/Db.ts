@@ -119,12 +119,10 @@ const seed = Effect.gen(function*() {
   const count = (table: string) =>
     sql<{ n: number }>`SELECT COUNT(*) AS n FROM ${sql(table)}`.pipe(Effect.map((r) => r[0]?.n ?? 0))
 
-  if ((yield* count("orgs")) === 0) {
-    yield* insertAll(
-      "orgs",
-      ["Acme", "Globex"].map((name, i) => ({ name, createdAt: new Date(Date.UTC(2025, 5, 1 + i)).toISOString() }))
-    )
-  }
+  // Both organizations, also in a database migrated from before organizations (which has Acme only).
+  yield* Effect.forEach(["Acme", "Globex"], (name, i) =>
+    sql`INSERT INTO orgs (name, createdAt) SELECT ${name}, ${new Date(Date.UTC(2025, 5, 1 + i)).toISOString()}
+        WHERE NOT EXISTS (SELECT 1 FROM orgs WHERE name = ${name})`, { discard: true })
   const orgs = yield* sql<{ id: number; name: string }>`SELECT id, name FROM orgs ORDER BY id`
   const orgId = (name: string) => orgs.find((o) => o.name === name)?.id ?? orgs[0]!.id
 
