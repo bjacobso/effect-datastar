@@ -233,12 +233,26 @@ describe("editing on the detail page", () => {
     await app.action("POST", "/teams", { teams: { draft: { id: "", name: "Short Lived" } } })
     const id = /\/teams\/(\d+)"[^>]*>Short Lived</.exec(await app.page("/teams?name=Short"))![1]
     const deleted = await app.action("DELETE", `/teams/${id}?from=detail`)
-    expect(deleted.events).toEqual([{
-      type: "patch-elements",
-      selector: "body",
-      mode: "append",
-      elements: `<script data-effect="el.remove()">window.location.assign("/teams")</script>`
-    }])
+    // The toast travels in a short-lived cookie, set right before navigating.
+    expect(deleted.events).toHaveLength(1)
+    expect(deleted.events[0]).toMatchObject({ type: "patch-elements", selector: "body", mode: "append" })
+    const script = (deleted.events[0] as { elements: string }).elements
+    expect(script).toContain(`window.location.assign("/teams")`)
+    const cookie = /document\.cookie = "([^"]*)"/.exec(script)![1]!
+    expect(cookie).toMatch(/^flash=[^;]+; path=\/; max-age=10; samesite=strict$/)
+    const pair = cookie.split(";")[0]!
+    expect(JSON.parse(decodeURIComponent(pair.slice("flash=".length)))).toEqual({ message: "Deleted", kind: "ok" })
+
+    // The list page shows it once and expires the cookie.
+    const landed = await app.handler(new Request("http://test/teams", { headers: { cookie: pair } }))
+    expect(landed.headers.get("set-cookie")).toMatch(/^flash=;.*(Max-Age=0|Expires=Thu, 01 Jan 1970)/i)
+    expect(await landed.text()).toMatch(/<div id="toast" role="status"[^>]*>.*Deleted<\/div>/)
+    // Without the cookie: no toast, no Set-Cookie. A cookie that isn't a flash is ignored.
+    const plain = await app.handler(new Request("http://test/teams"))
+    expect(plain.headers.get("set-cookie")).toBeNull()
+    expect(await plain.text()).toContain(`<div id="toast"></div>`)
+    const bogus = await app.handler(new Request("http://test/teams", { headers: { cookie: "flash=%7B%22nope%22%7D" } }))
+    expect(await bogus.text()).toContain(`<div id="toast"></div>`)
     expect((await app.handler(new Request(`http://test/teams/${id}`))).status).toBe(404)
 
     const restricted = await app.action("DELETE", "/teams/2?from=detail")

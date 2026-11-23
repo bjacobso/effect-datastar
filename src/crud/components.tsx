@@ -427,7 +427,7 @@ export const FormDialog = (props: {
   )
 }
 
-export const Toast = (props: { readonly message?: string; readonly kind?: "ok" | "error" }) =>
+export const Toast = (props: { readonly message?: string | undefined; readonly kind?: "ok" | "error" | undefined }) =>
   props.message === undefined
     ? <div id="toast" />
     : (

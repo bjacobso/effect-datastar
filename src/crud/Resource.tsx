@@ -39,7 +39,7 @@
  * `${name}.{query,draft,errors,dialog}`, DOM id prefix. An embed uses its own
  * `name` for the signal namespace and DOM ids.
  */
-import { Cause, Context, Data, Effect, Layer, Schema, Stream } from "effect"
+import { Cause, Context, Data, Effect, Layer, Option, Schema, Stream } from "effect"
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { Reactivity } from "effect/reactivity"
 import type { Model } from "effect/schema"
@@ -50,6 +50,7 @@ import * as ds from "../datastar/Attrs.ts"
 import type { SignalPath } from "../datastar/Attrs.ts"
 import * as Datastar from "../datastar/Datastar.ts"
 import * as Endpoint from "../datastar/Endpoint.ts"
+import * as Flash from "../datastar/Flash.ts"
 import { document, render } from "../datastar/Html.ts"
 import { Button } from "../ui/Button.tsx"
 import { Alert, Card, EmptyState, Skeleton } from "../ui/display.tsx"
@@ -401,13 +402,20 @@ export const define = <
 
     const update = Endpoint.make("PUT", "/:id", onRow((id, table, lock) => table.save(id, lock)), { prefix })
     const edit = Endpoint.make("GET", "/:id/edit", onRow((id, table, lock) => table.edit(id, lock)), { prefix, include: [] })
-    /** Delete. From the detail page (`?from=detail`), a successful delete goes back to the list. */
+    /**
+     * Delete. From the detail page (`?from=detail`), a successful delete goes back to the
+     * list, which shows the toast (a flash message: see `Flash`).
+     */
     const remove = Endpoint.make(
       "DELETE",
       "/:id",
       onRow((id, table, lock) =>
         Effect.flatMap(searchParams, (params) =>
-          table.remove(id, lock, params.get(FROM) === "detail" ? Datastar.redirect(prefix) : toast("Deleted"))
+          table.remove(
+            id,
+            lock,
+            params.get(FROM) === "detail" ? Flash.redirect(prefix, { message: "Deleted", kind: "ok" }) : toast("Deleted")
+          )
         )
       ),
       { prefix, include: [] }
@@ -788,10 +796,12 @@ export const define = <
     const Page = (props: {
       readonly query: Query.ListQuery<Sortable, FK>
       readonly initial?: { readonly page: Repo.Page<Row>; readonly lookups: Components.Lookups } | undefined
+      /** A toast carried over a redirect (e.g. "Deleted" after a delete on the detail page). */
+      readonly flash?: Flash.Flash | undefined
     }) => (
       <main>
         <listTable.View query={props.query} lock={undefined} initial={props.initial} />
-        <Components.Toast />
+        <Components.Toast message={props.flash?.message} kind={props.flash?.kind} />
       </main>
     )
 
@@ -802,13 +812,15 @@ export const define = <
         const params = yield* searchParams
         const q = query.fromSearchParams(params)
         const initial = yield* listTable.initial(q, undefined)
-        return yield* html(config.layout({
+        const flash = Option.getOrUndefined(yield* Flash.take)
+        const response = yield* html(config.layout({
           title: config.title,
           active: prefix,
           children: initial._tag === "Some"
-            ? <Page query={initial.value.query} initial={initial.value} />
-            : <Page query={q} />
+            ? <Page query={initial.value.query} initial={initial.value} flash={flash} />
+            : <Page query={q} flash={flash} />
         }))
+        return flash === undefined ? response : Flash.clear(response)
       })
     )
 

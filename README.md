@@ -93,8 +93,14 @@ The page has **Edit** and **Delete** for the record. Edit opens the same dialog
 as the list, with the same validation (and, for a user, the team select, whose
 options the live record keeps current). Delete asks for confirmation and, once
 the row is gone, sends the browser back to the list (`?from=detail` tells the
-delete route; `Datastar.redirect` does the navigation). A rejected delete (a
-team that still has members) stays on the page with a toast.
+delete route; `Flash.redirect` does the navigation). The list page then shows
+the "Deleted" toast: a navigation would lose a toast sent with it, so
+`Flash.redirect` puts it in a short-lived cookie (`flash`, 10 s) right before
+`location.assign`, and the list page renders it and expires the cookie
+(`src/datastar/Flash.ts`). A cookie rather than a query param: there is nothing
+to strip from the URL, a reload or a shared link doesn't toast again, and a
+link can't make the page say something. A rejected delete (a team that still
+has members) stays on the page with a toast.
 
 A section is an embed of another resource, with one `eq` filter locked to the
 page's row id, or any `(row) => Effect<ReactNode>`:
@@ -129,6 +135,7 @@ the query string. Its query lives in its signals and resets on reload.
   - `Attrs.ts`: signal paths checked against the signals schema, attribute helpers
   - `Endpoint.ts`: route plus typed client action (`remove.call({ id })` produces `@delete('/users/3')`), with an optional param-free path prefix and search params
   - `Html.ts`: React element to HTML string (`render` for patches, `document` for pages)
+  - `Flash.ts`: a toast carried across a redirect in a short-lived cookie
 - `src/crud/`: building blocks derived from a schema
   - `Resource.tsx`: composes everything below into resources (`define`, then `app`)
   - `Query.ts`: query signals schema, SQL `WHERE` / `ORDER BY`, URL params

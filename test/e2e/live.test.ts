@@ -353,6 +353,11 @@ describe("team detail page", () => {
     await detail.waitForURL(/\/teams$/)
     await detail.locator("tbody tr").first().waitFor()
     expect(await detail.locator("tbody").innerText()).not.toContain("Detail Remote")
+    // The toast came along (a flash cookie), once: a reload doesn't show it again.
+    await expect.poll(() => detail.locator("#toast").innerText()).toBe("Deleted")
+    expect((await detail.context().cookies()).map((c) => c.name)).not.toContain("flash")
+    await detail.reload()
+    expect(await detail.locator("#toast").innerText()).toBe("")
 
     expect([...detail.errors, ...other.errors]).toEqual([])
     await Promise.all([detail.close(), other.close()])
