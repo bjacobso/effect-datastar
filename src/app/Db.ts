@@ -142,6 +142,22 @@ const migrations = Migrator.fromRecord({
       FOREIGN KEY (tagId, orgId) REFERENCES tags(id, orgId) ON DELETE CASCADE
     )`
     yield* sql`CREATE INDEX user_tags_tagId ON user_tags(tagId)`
+  }),
+  /**
+   * Indexes for the list pages: every list query is `WHERE orgId = ? ORDER BY
+   * <sortable column>`. With only `(orgId)`, SQLite read all of an
+   * organization's rows and sorted them for each page (about 1 ms at 5000
+   * users); with `(orgId, column)` it reads the page's rows in order (about
+   * 0.02 ms). Live views re-run that query on every insert or delete, so it
+   * adds up (see docs/load.md).
+   */
+  "0006_list_indexes": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    for (const column of ["createdAt", "name", "email", "role", "startDate"]) {
+      yield* sql`CREATE INDEX ${sql(`users_orgId_${column}`)} ON users(orgId, ${sql(column)})`
+    }
+    yield* sql`CREATE INDEX teams_orgId_name ON teams(orgId, name)`
+    yield* sql`CREATE INDEX tags_orgId_name ON tags(orgId, name)`
   })
 })
 
