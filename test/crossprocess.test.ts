@@ -57,7 +57,7 @@ const openOnB = async (q: ReturnType<typeof usersQuery>) => {
 describe("row changes across processes", () => {
   it("a visible-row rename on A is a single-row patch on B", async () => {
     const s = await openOnB(usersQuery())
-    expect(s.first).toContain(`<tr id="users-87">`)
+    expect(s.first).toContain(`<tr id="users-87"`)
     const draft = await draftOn(87)
     sqlLog.reset()
     await a.action("PUT", "/users/87", userDraft({ ...draft, name: "Renamed On A" }))
@@ -69,13 +69,13 @@ describe("row changes across processes", () => {
     expect(tablePatch(events)).toBeUndefined()
     const [row, ...others] = rowPatches(events)
     expect(others).toEqual([])
-    expect(row!.elements).toMatch(/^<tr id="users-87"><td>(<span>|<a [^>]*>)?Renamed On A</)
+    expect(row!.elements).toMatch(/^<tr id="users-87"[^>]*><td[^>]*>(<span[^>]*>|<a [^>]*>)?Renamed On A</)
     expect(counted).toEqual({ pages: 0, counts: 0, rows: 1 })
   })
 
   it("a filtered-column change on A re-queries B's page", async () => {
     const s = await openOnB(usersQuery({}, { role: "member" }))
-    const target = Number(/<tr id="users-(\d+)">/.exec(s.first)![1])
+    const target = Number(/<tr id="users-(\d+)"/.exec(s.first)![1])
     const draft = await draftOn(target)
     sqlLog.reset()
     await a.action("PUT", `/users/${target}`, userDraft({ ...draft, role: "guest" }))
@@ -84,7 +84,7 @@ describe("row changes across processes", () => {
     await s.close()
     console.log("B, role change on A:", counted)
 
-    expect(tablePatch(events)!.elements).not.toContain(`<tr id="users-${target}">`)
+    expect(tablePatch(events)!.elements).not.toContain(`<tr id="users-${target}"`)
     expect(rowPatches(events)).toEqual([])
     expect(counted).toEqual({ pages: 1, counts: 1, rows: 0 })
   })
