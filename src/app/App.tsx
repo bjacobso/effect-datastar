@@ -5,6 +5,7 @@ import { Layer } from "effect"
 import { HttpRouter, HttpServerResponse, HttpStaticServer } from "effect/http"
 import { Reactivity } from "effect/reactivity"
 import * as Db from "./Db.ts"
+import { TeamMembers, TeamRoutes } from "./TeamDetail.tsx"
 import { Teams } from "./Teams.tsx"
 import { Users } from "./Users.tsx"
 
@@ -12,7 +13,8 @@ import { Users } from "./Users.tsx"
 export const Routes = Layer.mergeAll(
   HttpRouter.add("GET", "/", HttpServerResponse.redirect("/users")),
   Users.routes,
-  Teams.routes,
+  TeamRoutes,
+  TeamMembers.routes,
   HttpStaticServer.layer({ root: "public" })
 )
 

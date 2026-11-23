@@ -38,6 +38,41 @@ export const Users = Resource.make({
 
 That gives the page (server-rendered for the query in the URL), a live table, filters, sorting, paging, a create/edit dialog with per-field validation errors, delete, and the `Repo` / `Lookup` services. Everything it builds is exposed, so a resource can drop down a level when the config isn't enough.
 
+## Detail pages and embedded "has many" tables
+
+Every resource also has a detail page, `GET /teams/:id`, with the row's fields
+kept live by `GET /teams/:id/view` (so a rename shows up there too). Unknown and
+malformed ids get a 404 page. The display column links to it, and relation
+cells (a user's team) link to the referenced row's page.
+
+A resource can be embedded in another page with one `eq` filter locked:
+
+```tsx
+// src/app/TeamDetail.tsx
+export const TeamMembers = Users.embed({ name: "members", title: "Members", lock: "teamId" })
+export const TeamRoutes = Teams.routesWith({ sections: (team) => [TeamMembers.Section(team.id)] })
+// App: Layer.mergeAll(Users.routes, TeamRoutes, TeamMembers.routes, ...)
+```
+
+The embed keeps everything the users table has: live updates, sorting, the
+other filters, paging, and the create/edit dialog. It gets its own signal
+namespace (`members.*`) and DOM ids, so it can sit next to a full users table,
+and its own routes under `/users/embed/members/:scope/...`. The lock is enforced
+on the server:
+
+- `:scope` is decoded with the field's own schema (`/users/embed/members/abc/view` is rejected).
+- The embed's query schema has no `teamId` filter, and signals that try to set one are rejected.
+- Creates and updates get `teamId` from the server; any value in the draft is ignored.
+- Edits and deletes of rows outside the lock answer "no longer exists".
+- The locked column, filter and form field are hidden.
+
+`Teams.routesWith(...)` exists because users depend on teams (`relations: { teamId: Teams.Lookup }`),
+so the teams config can't name users; the sections are attached where both are in scope.
+
+**URL state:** an embed doesn't sync its query to the URL. The detail page's
+URL identifies the team, and two tables on one page would otherwise fight over
+the query string. Its query lives in its signals and resets on reload.
+
 ## Layout
 
 - `src/datastar/`: Datastar primitives for Effect HTTP
@@ -52,7 +87,7 @@ That gives the page (server-rendered for the query in the URL), a live table, fi
   - `Field.ts`, `Form.ts`: field metadata, form drafts (with input coercion) and per-field errors
   - `components.tsx`: generic filter bar, sortable table, pagination, form fields and dialog (`@kitajs/html`)
   - `Feedback.tsx`: toast and unexpected-error patches
-- `src/app/`: the `users` and `teams` resources, migrations (`Db.ts`) and app composition (`App.tsx`)
+- `src/app/`: the `users` and `teams` resources, the team detail page with embedded members (`TeamDetail.tsx`), migrations (`Db.ts`) and app composition (`App.tsx`)
 - `test/`: unit, in-process HTTP, and browser (`test/e2e`) tests
 
 ## How live updates work
