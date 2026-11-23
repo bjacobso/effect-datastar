@@ -43,7 +43,7 @@ import type { HttpApiError } from "effect/http-api"
 import type { SqlError } from "effect/sql"
 import type * as Query from "./Query.ts"
 import type * as Repo from "./Repo.ts"
-import type { Messages, ModelLike, RepoOf } from "./Resource.tsx"
+import type { Messages, ModelLike, RepoOf } from "./Resource.ts"
 
 // ---------------------------------------------------------------------------
 // Errors

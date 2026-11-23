@@ -17,7 +17,7 @@ import { Shell } from "../src/app/Layout.tsx"
 import { Team } from "../src/app/Team.ts"
 import { CurrentOrg, CurrentUser, Sessions } from "../src/auth/Auth.ts"
 import { RequireSession } from "../src/auth/Middleware.ts"
-import * as Resource from "@effect-datastar/crud/Resource.tsx"
+import * as Resource from "@effect-datastar/crud/Resource.ts"
 
 /** Type-checked, never run: serve `routes` with `services` provided. */
 const serve = <R,>(

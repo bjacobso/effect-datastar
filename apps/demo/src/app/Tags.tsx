@@ -1,5 +1,5 @@
 import { CurrentOrg } from "../auth/Auth.ts"
-import * as Resource from "@effect-datastar/crud/Resource.tsx"
+import * as Resource from "@effect-datastar/crud/Resource.ts"
 import { Layout } from "./Layout.tsx"
 import { Tag } from "./Tag.ts"
 

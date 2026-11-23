@@ -3,7 +3,7 @@
  * here, where every definition is in scope: users reference teams and tags,
  * and a team's page embeds its users.
  */
-import * as Resource from "@effect-datastar/crud/Resource.tsx"
+import * as Resource from "@effect-datastar/crud/Resource.ts"
 import { Tags } from "./Tags.tsx"
 import { Teams } from "./Teams.tsx"
 import { Users } from "./Users.tsx"

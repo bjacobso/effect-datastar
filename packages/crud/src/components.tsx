@@ -138,7 +138,8 @@ export const RangeFilter = (props: { readonly prefix: string; readonly filter: F
 // Table
 // ---------------------------------------------------------------------------
 
-export const formatCell = (field: Field.FieldInfo, value: unknown): string => {
+/** A value as plain text. */
+const formatValue = (value: unknown): string => {
   if (value === null || value === undefined) return "—"
   if (typeof value === "boolean") return value ? "✓" : "✗"
   if (DateTime.isDateTime(value)) return DateTime.formatIso(value).slice(0, 16).replace("T", " ")
@@ -153,7 +154,7 @@ export const CellValue = (props: { readonly field: Field.FieldInfo; readonly val
   if (typeof value === "boolean") return <Badge tone={value ? "success" : "neutral"}>{value ? "Yes" : "No"}</Badge>
   if (field.kind === "enum") return <Badge tone="accent">{String(value)}</Badge>
   if (DateTime.isDateTime(value) || field.kind === "date") {
-    return <span {...stylex.props(styles.date)}>{formatCell(field, value)}</span>
+    return <span {...stylex.props(styles.date)}>{formatValue(value)}</span>
   }
   if (field.widget === "color" && typeof value === "string") {
     return (
@@ -163,7 +164,7 @@ export const CellValue = (props: { readonly field: Field.FieldInfo; readonly val
       </span>
     )
   }
-  return <span>{formatCell(field, value)}</span>
+  return <span>{formatValue(value)}</span>
 }
 
 /**

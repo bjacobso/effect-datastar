@@ -40,9 +40,6 @@ export const patchElements = (
   options?: Omit<ConstructorParameters<typeof PatchElements>[0], "elements">
 ): DatastarEvent => new PatchElements({ elements, ...options })
 
-export const removeElements = (selector: string): DatastarEvent =>
-  new PatchElements({ elements: "", selector, mode: "remove" })
-
 /**
  * Run a script in the browser: a self-removing `<script>` appended to `<body>`
  * (Datastar v1 has no separate execute-script event).
