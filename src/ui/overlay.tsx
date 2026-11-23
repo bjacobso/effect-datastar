@@ -40,7 +40,12 @@ export function Modal({
   children: ReactNode
 }) {
   return (
-    <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
+    // Modal only while open. ui-sdk keeps a closing modal's layer for its exit transition
+    // and, while it runs, swallows any press over the (fading) backdrop: a pointerdown
+    // capture listener calls `preventDefault` and the click is stopped, so clicks on the
+    // page are lost for the transition (~150 ms). "trap-focus" doesn't consume outside
+    // presses, so the page gets them as soon as the dialog starts closing.
+    <Dialog open={open} modal={open ? true : "trap-focus"} onOpenChange={(next) => !next && onClose()}>
       <DialogBackdrop {...stylex.props(styles.backdrop)} />
       <DialogContent
         keepMounted={keepMounted ?? false}

@@ -57,13 +57,13 @@ export const DIALOG = `ds-island[name="dialog"][open]`
 export const dialog = (page: Page) => page.locator(DIALOG)
 
 /**
- * Submits the open dialog and waits until it has closed: the server's `dialog: false` patch,
- * then ui-sdk's exit transition. While that runs the dialog is still modal, and a click on
- * the page behind it is swallowed (as for a real user clicking that fast).
+ * Submits the open dialog and waits for the server's `dialog: false` patch (the host loses
+ * `open`). The exit transition may still be running; the page takes clicks right away
+ * (see `Modal` in src/ui/overlay.tsx).
  */
 export const save = async (page: Page) => {
   await dialog(page).locator("button[type=submit]").click()
-  await closed(page)
+  await dialog(page).waitFor({ state: "detached" })
 }
 
 /** Waits until no dialog is shown (closed and finished its exit transition). */

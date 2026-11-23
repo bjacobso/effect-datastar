@@ -126,6 +126,19 @@ describe("users page", () => {
     expect(page.errors).toEqual([])
     await page.close()
   })
+
+  it("takes clicks on the page while the dialog's exit transition runs", async () => {
+    const page = await open("/users")
+    await page.getByRole("button", { name: "New user" }).click()
+    await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true)
+    await page.keyboard.press("Escape")
+    // Straight away: the dialog is still fading out.
+    await sortBy(page, "Name")
+    expect(await page.getByRole("dialog").count()).toBe(1)
+    await expect.poll(() => new URL(page.url()).search).toBe("?sort=name&dir=asc")
+    expect(page.errors).toEqual([])
+    await page.close()
+  })
 })
 
 describe("team select island", () => {
