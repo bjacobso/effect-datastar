@@ -10,9 +10,10 @@
  */
 import type { ReactNode } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
+import { timeRender } from "../metrics/Metrics.ts"
 
 /** HTML for a fragment (a patch). */
-export const render = (node: ReactNode): string => renderToStaticMarkup(node)
+export const render = (node: ReactNode): string => timeRender(() => renderToStaticMarkup(node))
 
 /** HTML for a whole page: `<!doctype html>` + the `<html>` element. */
 export const document = (node: ReactNode): string => `<!doctype html>${renderToStaticMarkup(node)}`

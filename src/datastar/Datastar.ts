@@ -10,6 +10,7 @@
  */
 import { Data, Effect, Schema, Stream } from "effect"
 import { HttpServerRequest, HttpServerResponse } from "effect/http"
+import { counters } from "../metrics/Metrics.ts"
 
 // ---------------------------------------------------------------------------
 // Events
@@ -105,12 +106,29 @@ export const respond = <R>(
     const stream: Stream.Stream<DatastarEvent, never, R> = Stream.isStream(events)
       ? Stream.flattenIterable(Stream.map(events, toArray))
       : Stream.fromIterableEffect(Effect.map(events, toArray))
+    const encoded = stream.pipe(
+      Stream.mapEffect(encodeEvent),
+      Stream.map((s) => {
+        const bytes = encoder.encode(s)
+        counters.sseEvents++
+        counters.sseBytes += bytes.byteLength
+        return bytes
+      }),
+      Stream.provideContext(context)
+    )
+    // Long-lived responses (live views) are counted while open, for load tests (`Metrics`).
+    const counted = Stream.isStream(events)
+      ? Stream.unwrap(Effect.acquireRelease(
+        Effect.sync(() => {
+          counters.streamsOpen++
+          counters.streamsOpened++
+          return encoded
+        }),
+        () => Effect.sync(() => counters.streamsOpen--)
+      ))
+      : encoded
     return HttpServerResponse.stream(
-      stream.pipe(
-        Stream.mapEffect(encodeEvent),
-        Stream.map((s) => encoder.encode(s)),
-        Stream.provideContext(context)
-      ),
+      counted,
       {
         contentType: "text/event-stream",
         headers: { "cache-control": "no-cache", "connection": "keep-alive" }

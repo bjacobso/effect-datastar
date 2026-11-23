@@ -1,8 +1,9 @@
 /**
  * App composition, shared by `main.tsx` and the tests.
  */
-import { type Duration, Layer } from "effect"
-import { HttpRouter, HttpServerResponse, HttpStaticServer } from "effect/http"
+import { Config, type Duration, Effect, Layer } from "effect"
+import { HttpRouter, HttpServerRequest, HttpServerResponse, HttpStaticServer } from "effect/http"
+import * as Metrics from "../metrics/Metrics.ts"
 import { Sessions } from "../auth/Auth.ts"
 import { RequireSession } from "../auth/Middleware.ts"
 import * as DistributedReactivity from "../reactivity/DistributedReactivity.ts"
@@ -22,8 +23,29 @@ const Protected = Layer.mergeAll(
   Resources.routes
 ).pipe(Layer.provide(RequireSession.layer))
 
+/**
+ * `GET /_metrics` (see `metrics/Metrics.ts`), only with `METRICS=1`: it is
+ * unauthenticated and meant for load tests (`scripts/load/`).
+ */
+const MetricsRoutes: Layer.Layer<never, never, HttpRouter.HttpRouter> = Layer.unwrap(Effect.gen(function*() {
+  const enabled = yield* Config.Boolean("METRICS").pipe(Config.withDefault(false))
+  if (!enabled) return Layer.empty as Layer.Layer<never, never, HttpRouter.HttpRouter>
+  Metrics.install()
+  return HttpRouter.add(
+    "GET",
+    "/_metrics",
+    Effect.map(HttpServerRequest.HttpServerRequest, (request) => {
+      // `?gc=1` collects garbage first (when started with `--expose-gc`), for steadier memory numbers.
+      const gc = (globalThis as { gc?: () => void }).gc
+      if (request.url.includes("gc=1") && gc) gc()
+      return HttpServerResponse.jsonUnsafe(Metrics.snapshot())
+    })
+  )
+}).pipe(Effect.orDie))
+
 /** All routes. */
 export const Routes = Layer.mergeAll(
+  MetricsRoutes,
   Protected,
   // Sign in and out (public).
   LoginRoutes,
@@ -42,7 +64,8 @@ export const Routes = Layer.mergeAll(
  */
 export const Infra = (db: {
   readonly filename: string
-  readonly seed?: boolean
+  /** `"load"`: the demo data plus the load-test organizations (`Db.ts`). */
+  readonly seed?: boolean | "load"
   /** How often to poll for other processes' invalidations (default 100 millis). */
   readonly pollInterval?: Duration.Input
 }) =>

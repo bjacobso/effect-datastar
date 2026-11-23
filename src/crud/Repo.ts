@@ -55,6 +55,7 @@
 import { Cause, Data, Effect, Option, Queue, Schema, Stream } from "effect"
 import type * as Arr from "effect/Array"
 import { Reactivity } from "effect/reactivity"
+import { counters } from "../metrics/Metrics.ts"
 import * as Payload from "../reactivity/Payload.ts"
 import type { Model } from "effect/schema"
 import { SqlClient, SqlModel } from "effect/sql"
@@ -666,14 +667,20 @@ export const make = <
         let current: Page<Row> | undefined
 
         const requery = (reason: "initial" | "table" | "dependency") =>
-          Effect.map(listIn(q, v), (page): ReadonlyArray<LiveEvent<Row>> => {
+          Effect.map(Effect.suspend(() => {
+            counters.requeries++
+            return listIn(q, v)
+          }), (page): ReadonlyArray<LiveEvent<Row>> => {
             current = page
             return [{ _tag: "Page", page, reason }]
           })
 
         /** Re-fetches rows of the current page; `undefined` if one vanished (deleted meanwhile). */
         const refetch = (ids: ReadonlyArray<RowId>) =>
-          Effect.map(findByIds(ids, v), (fetched) => {
+          Effect.map(Effect.suspend(() => {
+            counters.refetches++
+            return findByIds(ids, v)
+          }), (fetched) => {
             if (fetched.length !== ids.length) return undefined
             const byId = new Map(fetched.map((row) => [idOf(row), row] as const))
             if (current) current = { ...current, rows: current.rows.map((row) => byId.get(idOf(row)) ?? row) }

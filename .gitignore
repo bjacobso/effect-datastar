@@ -6,3 +6,5 @@ dist
 public/build
 # Browser test screenshots
 test/e2e/screenshots
+# Load test databases, results and profiles (scripts/load/)
+.load
