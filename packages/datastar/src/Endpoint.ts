@@ -24,7 +24,8 @@ type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
 export class Js {
   constructor(readonly expr: Expr) {}
 }
-export const js = (expr: Expr) => new Js(expr)
+export const js = (expr: Expr | { readonly toExpr: () => string }) =>
+  new Js(typeof expr === "string" ? expr : expr.toExpr())
 
 type Param = string | number | Js
 
@@ -38,6 +39,8 @@ export interface CallOptions {
   readonly include?: ReadonlyArray<SignalPath> | undefined
   /** Keep the request open while the tab is hidden (long-lived views). */
   readonly openWhenHidden?: boolean | undefined
+  /** Reconnect interval in milliseconds (e.g. jittered to avoid reconnect storms). */
+  readonly retryInterval?: number | undefined
   /** Search params appended to the URL (`?embed=members&scope=2`). */
   readonly search?: Readonly<Record<string, string>> | undefined
   /**
@@ -76,6 +79,7 @@ export const make = <const P extends HttpRouter.PathInput | "", R, const Prefix 
     const opts: Array<string> = []
     if (include) opts.push(`filterSignals: {include: ${includeRegex(include)}}`)
     if (callOptions?.openWhenHidden) opts.push(`openWhenHidden: true`)
+    if (callOptions?.retryInterval !== undefined) opts.push(`retryInterval: ${callOptions.retryInterval}`)
     const args = opts.length > 0 ? `, {${opts.join(", ")}}` : ""
     const target = callOptions?.searchExpr === undefined ? `'${url}'` : `'${url}' + (${callOptions.searchExpr})`
     return `@${method.toLowerCase()}(${target}${args})`
