@@ -1,0 +1,23 @@
+{
+  "name": "@effect-datastar/board",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx scripts/build.ts --watch",
+    "start": "npm run build && npm run serve",
+    "build": "tsx scripts/build.ts",
+    "serve": "NODE_ENV=production node --enable-source-maps dist/server.js",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@effect-datastar/datastar": "0.0.0",
+    "@effect-datastar/reactivity": "0.0.0",
+    "@effect-datastar/ui": "0.0.0",
+    "@effect/platform-node": "^4.1.5",
+    "@stylexjs/stylex": "0.19.2",
+    "effect": "^4.1.5",
+    "react": "19.3.1"
+  }
+}

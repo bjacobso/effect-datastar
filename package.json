@@ -8,8 +8,10 @@
   ],
   "scripts": {
     "dev": "npm run dev -w @effect-datastar/demo",
+    "dev:board": "npm run dev -w @effect-datastar/board",
     "start": "npm start -w @effect-datastar/demo",
     "build": "npm run build -w @effect-datastar/demo",
+    "build:board": "npm run build -w @effect-datastar/board",
     "serve": "npm run serve -w @effect-datastar/demo",
     "load": "npm run load -w @effect-datastar/demo --",
     "typecheck": "tsc --noEmit -p . && npm run typecheck --workspaces --if-present",
