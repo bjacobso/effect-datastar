@@ -1,3 +1,4 @@
+/** @jsxImportSource @effect-datastar/ui */
 /**
  * Sign-in and sign-out (public routes, not behind `RequireSession`):
  *
@@ -11,8 +12,8 @@ import { Effect, Layer, Option, Schema } from "effect"
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { COOKIE, Sessions } from "../auth/Auth.ts"
 import { safeNext } from "../auth/Middleware.ts"
-import * as ds from "@effect-datastar/datastar/Attrs.ts"
 import * as Datastar from "@effect-datastar/datastar/Datastar.ts"
+import { Action, Signals } from "@effect-datastar/datastar/Expr.ts"
 import { document } from "@effect-datastar/ui/Html.ts"
 import { Button } from "@effect-datastar/ui/Button.tsx"
 import { Card } from "@effect-datastar/ui/display.tsx"
@@ -25,17 +26,16 @@ import { Shell } from "./Layout.tsx"
 const LoginSignals = Schema.Struct({
   login: Schema.Struct({ email: Schema.String, password: Schema.String, next: Schema.String, error: Schema.String })
 })
-const signals = ds.make(LoginSignals)
+const $ = Signals.from(LoginSignals)
+const submitLogin = Action.raw("@post('/login')")
 
 const LoginPage = (props: { readonly next: string }) => (
   <main {...stylex.props(styles.main)}>
     <Card title="Sign in" description="Use your organization account.">
       <form
         id="login-form"
-        {...ds.merge(
-          signals.init({ login: { email: "", password: "", next: props.next, error: "" } }),
-          ds.on("submit", "@post('/login')", { prevent: true })
-        )}
+        $signals={$.init({ login: { email: "", password: "", next: props.next, error: "" } })}
+        $on={{ submit: { run: submitLogin, prevent: true } }}
         {...stylex.props(styles.form)}
       >
         <label {...stylex.props(form.field)}>
@@ -46,7 +46,7 @@ const LoginPage = (props: { readonly next: string }) => (
             type="email"
             autoComplete="username"
             required
-            {...ds.bind(signals.path("login.email"))}
+            $bind={$.login.email}
             {...stylex.props(shared.control)}
           />
         </label>
@@ -58,14 +58,15 @@ const LoginPage = (props: { readonly next: string }) => (
             type="password"
             autoComplete="current-password"
             required
-            {...ds.bind(signals.path("login.password"))}
+            $bind={$.login.password}
             {...stylex.props(shared.control)}
           />
         </label>
         <p
           id="login-error"
           role="alert"
-          {...ds.merge(ds.show(signals.$("login.error")), ds.text(signals.$("login.error")))}
+          $show={$.login.error.nonEmpty()}
+          $text={$.login.error}
           {...stylex.props(form.error)}
         />
         <Button variant="primary" type="submit" block>Sign in</Button>
