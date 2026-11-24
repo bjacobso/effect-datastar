@@ -176,6 +176,21 @@ export interface ViewBuilder<S extends Schema.Top, Slots extends Record<string, 
       readonly onSignalsError?: ((error: Datastar.SignalsError) => Datastar.Events) | undefined
     }
   ) => ActionDescriptor<P, Keys, SignalsPayloadFor<S, Keys>, R>
+  readonly live: <
+    const P extends HttpRouter.PathInput,
+    const Keys extends ReadonlyArray<keyof S["Type"] & string> | undefined = undefined,
+    R = never
+  >(
+    path: P,
+    handle: (
+      ctx: ActionHandlerContext<SignalsPayloadFor<S, Keys>, P>
+    ) => Stream.Stream<Datastar.Events, never, R> | Effect.Effect<Datastar.Events, never, R>,
+    options?: {
+      readonly signals?: Keys
+      readonly jitter?: JitterOption | undefined
+      readonly onSignalsError?: ((error: Datastar.SignalsError) => Datastar.Events) | undefined
+    }
+  ) => LiveDescriptor<P, Keys, SignalsPayloadFor<S, Keys>, R>
 }
 
 // ---------------------------------------------------------------------------
@@ -343,7 +358,8 @@ const buildView = <
     $,
     slots,
     patchSignals,
-    action: (method, path, cfg) => action(method, path, cfg as any) as any
+    action: (method, path, cfg) => action(method, path, cfg as any) as any,
+    live: (path, handle, opts) => live(path, handle as any, opts as any) as any
   }
 
   const actionDefs = (

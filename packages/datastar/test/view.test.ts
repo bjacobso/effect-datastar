@@ -37,11 +37,11 @@ const makeCounterView = () =>
         handle: ({ params }) => Effect.succeed([slots.log.removeItem(Number(params.id))])
       })
     }),
-    live: ({ slots }) =>
-      View.live(
+    live: ({ live, slots }) =>
+      live(
         "/counter/live",
-        () => Stream.make([slots.display.morph(0)]),
-        { jitter: { min: 1200, max: 1800 } }
+        ({ signals }) => Stream.make([slots.display.morph(signals.count)]),
+        { signals: ["count"] as const, jitter: { min: 1200, max: 1800 } }
       ),
     onSignalsError: (err) => [Datastar.patchSignals({ error: err._tag })]
   })
@@ -88,7 +88,9 @@ describe("View.make", () => {
   it("generates jittered retryInterval for View.live", () => {
     const counter = makeCounterView()
     const expr = counter.live.call().toExpr()
-    expect(expr).toMatch(/^@get\('\/counter\/live', \{openWhenHidden: true, retryInterval: \d+\}\)$/)
+    expect(expr).toMatch(
+      /^@get\('\/counter\/live', \{filterSignals: \{include: \/\^\(counter\\\.count\)\(\\\.\|\$\)\/\}, openWhenHidden: true, retryInterval: \d+\}\)$/
+    )
     const interval = Number(/retryInterval: (\d+)/.exec(expr)![1])
     expect(interval).toBeGreaterThanOrEqual(1200)
     expect(interval).toBeLessThanOrEqual(1800)
@@ -138,11 +140,12 @@ describe("View.make", () => {
       const badBody = await badRes.text()
       expect(badBody).toContain('data: signals {"error":"SignalsError"}')
 
-      // 4. Live stream endpoint
-      const liveRes = await handler(new Request("http://localhost/counter/live"))
+      // 4. Live stream endpoint (with typed signal decoding via ViewBuilder.live)
+      const liveUrl = `http://localhost/counter/live?datastar=${encodeURIComponent(JSON.stringify({ counter: { count: 7 } }))}`
+      const liveRes = await handler(new Request(liveUrl))
       expect(liveRes.status).toBe(200)
       const liveBody = await liveRes.text()
-      expect(liveBody).toContain('data: elements <span id="counter-display">0</span>')
+      expect(liveBody).toContain('data: elements <span id="counter-display">7</span>')
     } finally {
       await dispose()
     }

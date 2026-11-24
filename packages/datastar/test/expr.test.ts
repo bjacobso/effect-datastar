@@ -184,6 +184,9 @@ describe("E tagged template literal", () => {
     expect(E`plain text`.toExpr()).toBe('"plain text"')
     expect(E``.toExpr()).toBe('""')
     expect(E`${$.query.page}`.toExpr()).toBe('"" + $query.page')
+    expect(E`${$.query.page}${$.selection.length} items`.toExpr()).toBe(
+      '"" + $query.page + $selection.length + " items"'
+    )
   })
 })
 

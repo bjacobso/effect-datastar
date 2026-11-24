@@ -349,7 +349,9 @@ export const E = (
     if (hasStringLiteral) return createExpr<string>(parts[0]!, true)
     return createExpr<string>(`"" + ${parts[0]!}`, false)
   }
-  if (!hasStringLiteral) {
+  const needsLeadingString =
+    !hasStringLiteral || (strings[0]!.length === 0 && (strings.length <= 1 || strings[1]!.length === 0))
+  if (needsLeadingString) {
     return createExpr<string>(`"" + ${parts.join(" + ")}`, false)
   }
   return createExpr<string>(parts.join(" + "), false)
