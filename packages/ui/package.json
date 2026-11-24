@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./jsx-runtime": "./src/jsx-runtime.ts",
+    "./jsx-dev-runtime": "./src/jsx-dev-runtime.ts",
     "./*": "./src/*"
   },
   "scripts": {
