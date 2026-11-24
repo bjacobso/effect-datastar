@@ -1,3 +1,4 @@
+/** @jsxImportSource @effect-datastar/ui */
 /**
  * Bulk actions on a table's selected rows: the selection checkboxes, the bar
  * ("N selected", Delete, "Set role…"), and the toasts that report the outcome.
@@ -14,8 +15,10 @@
  * out, paged away).
  */
 import * as stylex from "@stylexjs/stylex"
+import { Schema } from "effect"
 import * as ds from "@effect-datastar/datastar/Attrs.ts"
 import type { SignalPath } from "@effect-datastar/datastar/Attrs.ts"
+import { Action, E, el, raw, type Signal, Signals } from "@effect-datastar/datastar/Expr.ts"
 import { Button } from "@effect-datastar/ui/Button.tsx"
 import { styles as form } from "@effect-datastar/ui/form.tsx"
 import { shared } from "@effect-datastar/ui/shared.ts"
@@ -23,8 +26,11 @@ import { color, font, radius, space } from "@effect-datastar/ui/theme/tokens.sty
 import type { Option } from "./Lookup.ts"
 import { NULL } from "./Query.ts"
 
-const ref = (path: SignalPath) => `$${path}`
-const js = (value: unknown) => JSON.stringify(value)
+const arraySignal = (path: SignalPath): Signal<ReadonlyArray<unknown>> =>
+  (Signals.from(Schema.Struct({ [path]: Schema.Array(Schema.Unknown) })) as Record<string, Signal<ReadonlyArray<unknown>>>)[path]!
+
+const stringSignal = (path: SignalPath): Signal<string> =>
+  (Signals.from(Schema.Struct({ [path]: Schema.String })) as Record<string, Signal<string>>)[path]!
 
 /** The signal paths of one table's bulk state. */
 export interface Paths {
@@ -39,24 +45,29 @@ export interface Paths {
 
 /** Drops selected ids that are no longer on the page. For `data-effect` on the table's section. */
 export const prune = (p: Paths): ds.Expr => {
-  const sel = ref(p.selection)
-  const page = ref(p.page)
-  return `${sel}.some((id) => !${page}.includes(id)) && (${sel} = ${sel}.filter((id) => ${page}.includes(id)))`
+  const sel = arraySignal(p.selection)
+  const page = arraySignal(p.page)
+  return Action.when(
+    sel.some((id) => page.includes(id).not()),
+    sel.set(sel.filter((id) => page.includes(id)))
+  ).toExpr()
 }
 
 /** The header checkbox: selects every row on this page, or none. */
 export const SelectAll = (props: { readonly paths: Paths }) => {
-  const sel = ref(props.paths.selection)
-  const page = ref(props.paths.page)
+  const sel = arraySignal(props.paths.selection)
+  const page = arraySignal(props.paths.page)
   return (
     <input
       type="checkbox"
       aria-label="Select all on this page"
-      {...ds.effect(
-        `el.checked = ${page}.length > 0 && ${page}.every((id) => ${sel}.includes(id)); ` +
-          `el.indeterminate = !el.checked && ${sel}.length > 0`
+      $effect={Action.seq(
+        el.checked.set(page.nonEmpty().and(page.every((id) => sel.includes(id)))),
+        el.indeterminate.set(el.checked.not().and(sel.nonEmpty()))
       )}
-      {...ds.on("change", `${sel} = el.checked ? [...${page}] : []`)}
+      $on={{
+        change: sel.set(el.checked.ternary(raw<ReadonlyArray<unknown>>(`[...${page.toExpr()}]`), []))
+      }}
       {...stylex.props(form.checkbox, shared.focusRing)}
     />
   )
@@ -64,14 +75,13 @@ export const SelectAll = (props: { readonly paths: Paths }) => {
 
 /** A row's checkbox. `id` is the row's id as it appears in the selection signal. */
 export const SelectRow = (props: { readonly paths: Paths; readonly id: unknown; readonly label: string }) => {
-  const sel = ref(props.paths.selection)
-  const id = js(props.id)
+  const sel = arraySignal(props.paths.selection)
   return (
     <input
       type="checkbox"
       aria-label={`Select ${props.label}`}
-      {...ds.effect(`el.checked = ${sel}.includes(${id})`)}
-      {...ds.on("change", `${sel} = el.checked ? [...${sel}.filter((x) => x !== ${id}), ${id}] : ${sel}.filter((x) => x !== ${id})`)}
+      $effect={el.checked.set(sel.includes(props.id))}
+      $on={{ change: sel.toggle(props.id, el.checked) }}
       {...stylex.props(form.checkbox, shared.focusRing)}
     />
   )
@@ -101,7 +111,9 @@ export const Bar = (props: {
   /** The bulk delete action (sends the selection). */
   readonly remove: ds.Expr
 }) => {
-  const sel = ref(props.paths.selection)
+  const sel = arraySignal(props.paths.selection)
+  const field = stringSignal(props.paths.field)
+  const value = stringSignal(props.paths.value)
   return (
     <div
       id={props.id}
@@ -110,15 +122,23 @@ export const Bar = (props: {
       // Hidden until something is selected (and before Datastar runs). A morph resets the
       // style attribute; `data-show` watches it and applies itself again.
       style={{ display: "none" }}
-      {...ds.show(`${sel}.length > 0`)}
+      $show={sel.nonEmpty()}
       {...stylex.props(styles.bar)}
     >
-      <span {...ds.text(`${sel}.length + ' selected'`)} {...stylex.props(styles.count)} />
+      <span $text={E`${sel.length} selected`} {...stylex.props(styles.count)} />
       {props.setters.map((s) => (
         <select
           key={s.key}
           aria-label={`Set ${s.label.toLowerCase()}`}
-          {...ds.on("change", `el.value !== '' && (${ref(props.paths.field)} = ${js(s.key)}, ${ref(props.paths.value)} = el.value, ${props.update}); el.value = ''`)}
+          $on={{
+            change: Action.seq(
+              Action.when(
+                el.value.neq(""),
+                Action.seq(field.set(s.key), value.set(el.value), props.update)
+              ),
+              el.value.set("")
+            )
+          }}
           {...stylex.props(shared.control, styles.select)}
         >
           <option value="">{`Set ${s.label.toLowerCase()}…`}</option>
@@ -127,12 +147,12 @@ export const Bar = (props: {
         </select>
       ))}
       <span {...stylex.props(styles.spacer)} />
-      <Button variant="ghost" size="sm" {...ds.on("click", `${sel} = []`)}>Clear</Button>
+      <Button variant="ghost" size="sm" {...ds.on("click", sel.clear().toExpr())}>Clear</Button>
       <Button
         variant="danger"
         size="sm"
         icon="trash"
-        {...ds.on("click", `confirm('Delete ' + ${sel}.length + ' selected ${props.plural.replace(/'/g, "\\'")}?') && ${props.remove}`)}
+        {...ds.on("click", Action.confirm(E`Delete ${sel.length} selected ${props.plural}?`, props.remove).toExpr())}
       >
         Delete
       </Button>

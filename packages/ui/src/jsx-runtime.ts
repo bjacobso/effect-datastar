@@ -9,25 +9,14 @@
 import type * as React from "react"
 import { Fragment, jsx as reactJsx, jsxs as reactJsxs } from "react/jsx-runtime"
 import * as Attrs from "@effect-datastar/datastar/Attrs.ts"
+import type { ActionLike, ExprLike, SignalLike } from "@effect-datastar/datastar/Expr.ts"
 
 export { Fragment }
+export type { ActionLike, ExprLike, SignalLike }
 
 // ---------------------------------------------------------------------------
-// Structural DSL interfaces (shared with @effect-datastar/datastar Expr DSL)
+// Datastar JSX prop types
 // ---------------------------------------------------------------------------
-
-export interface ExprLike<A = unknown> {
-  readonly toExpr: () => string
-  readonly _type?: A | undefined
-}
-
-export interface SignalLike<A = unknown> extends ExprLike<A> {
-  readonly path: Attrs.SignalPath
-}
-
-export interface ActionLike {
-  readonly toExpr: () => string
-}
 
 export type EventHandlerSpec =
   | ActionLike
