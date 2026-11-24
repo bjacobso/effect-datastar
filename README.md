@@ -4,10 +4,13 @@ An exploration of a fully Effect-native [Datastar](https://data-star.dev) app: s
 
 ```sh
 npm install
-npm run dev        # build in watch mode and (re)start the server: http://localhost:3000/users
-npm start          # production build, then node dist/server.js
-npm test           # unit + HTTP tests (in-process, in-memory SQLite)
-npm run test:e2e   # browser tests (builds once, real server + Playwright Chromium)
+npm run dev        # build demo in watch mode and (re)start the server: http://localhost:3000/users
+npm start          # production build of demo, then node apps/demo/dist/server.js
+npm run dev:board  # live Kanban board example (4-layer Datastar DSL): http://localhost:3001
+npm run build:board # production build of apps/board
+npm run typecheck  # typecheck root + all workspaces
+npm test           # unit + HTTP + package boundary tests (in-process, in-memory SQLite)
+npm run test:e2e   # browser tests (builds demo once, real server + Playwright Chromium)
 npm run load -- --streams 1000 --rate 5   # load test of live views (after npm run build), see docs/load.md
 ```
 
@@ -372,37 +375,38 @@ guessed ids, references, embeds, the API, live streams, bulk actions, tags),
 can't catch a cross-organization team or tag) and `test/e2e/auth.test.ts` (sign
 in as Acme, see nothing of Globex, sign out).
 
+## Datastar DSL
+
+Beyond the CRUD generator, `@effect-datastar/datastar` and `@effect-datastar/ui` provide a 4-layer typed Datastar DSL (demonstrated end-to-end in `apps/board`, a live Kanban board with SSE sync across tabs via `npm run dev:board`):
+
+1. **Typed signals & expressions (`packages/datastar/src/Expr.ts`):** `Signals.from(schema)` turns an Effect `Schema` struct into a typed signal tree (`$.draft.title`, `$.selection`) with `.set(...)`, `.toggle(...)`, `.push(...)`, `.remove(...)`, `.clear()`, `.inc()`, `.dec()`, composable `Expr` combinators (`eq`, `and`, `nonEmpty`, `includes`, `filter`, …), the `E` tagged template literal, `Action` (`seq`, `when`, `confirm`, `raw`), and `el`/`evt` DOM helpers — all compiling to escaped Datastar JS expressions.
+2. **Datastar JSX runtime (`packages/ui/src/jsx-runtime.ts`):** Opt in with `/** @jsxImportSource @effect-datastar/ui */` to write typed `$`-prefixed props (`$signals`, `$bind`, `$show`, `$text`, `$effect`, `$init`, `$indicator`, `$ignoreMorph`, `$on`, `$onSignalPatch`, `$attr`, `$class`) directly on HTML elements, compiled to `data-*` attributes at render time with a zero-overhead fast path for plain elements.
+3. **Typed patch slots (`packages/datastar/src/Slot.ts` & `packages/ui/src/Slot.tsx`):** Renderer-agnostic `Slot.make` / `Slot.keyed` and React `reactSlot` / `keyedSlot` helpers pairing a `<Slot.Mount />` target with typed `morph`, `prepend`, `append`, and `remove` SSE patch emitters.
+4. **Unified views (`packages/datastar/src/View.ts`):** `View.make`, `View.action`, and `View.live` bundle a namespaced signal tree (`$`), scoped `slots`, auto-derived server `Datastar.signals` + client `filterSignals`, jittered `retryInterval` for SSE streams, and `.scope(ns)` for multi-instance embedding.
+
 ## Layout
 
-- `src/datastar/`: Datastar primitives for Effect HTTP
-  - `Datastar.ts`: patch events, SSE `respond` (the handler error type must be `never`), schema-decoded `signals`
-  - `Attrs.ts`: signal paths checked against the signals schema, attribute helpers
-  - `Endpoint.ts`: route plus typed client action (`remove.call({ id })` produces `@delete('/users/3')`), with an optional param-free path prefix and search params
-  - `Html.ts`: React element to HTML string (`render` for patches, `document` for pages)
-  - `Flash.ts`: a toast carried across a redirect in a short-lived cookie
-  - `Shared.ts`: live views shared by every tab that shows the same thing (snapshot, deltas, bounded buffering)
-- `src/crud/`: building blocks derived from a schema
-  - `Resource.tsx`: composes everything below into resources (`define`, then `app`)
-  - `Query.ts`: query signals schema, SQL `WHERE` / `ORDER BY`, URL params
-  - `Repo.ts`: `SqlModel.makeRepository` plus paginated `list`, a `live` stream with row-level updates, and transactional `updateMany` / `deleteMany`
-  - `ManyToMany.ts`: many-to-many fields (`Ids`), their SQL reads, writes and `has` filter
-  - `Lookup.ts`: options from another table, for foreign-key selects, filters and labels
-  - `Field.ts`, `Form.ts`, `Schemas.ts`: field metadata and widgets derived from schemas (`LocalDate`, `Color`), form drafts (with input coercion) and per-field errors
-  - `components.tsx`: generic filter bar, sortable table, pagination, form fields and dialog (React + StyleX)
-  - `Bulk.tsx`: selection checkboxes, the bulk bar and its toasts
-  - `UrlState.ts`: the query in the address bar, with history (push, typing, popstate)
-  - `Feedback.tsx`: toast and unexpected-error patches
-  - `Api.ts`: a JSON `HttpApiGroup` (list, get, create, update, delete) from a resource
-  - `Scope.ts`: the `tenant` option: a column scoped by a request-level service
-- `src/auth/`: `Auth.ts` (`CurrentUser`, `CurrentOrg`, `Sessions`), `Password.ts` (scrypt), `Middleware.ts` (`RequireSession`, `Authentication`)
-- `src/ui/`: the design system, copied from `@dw/ui` (document-workflow-service `packages/ui`): StyleX tokens and themes (`theme/`), global CSS and fonts, Button, form styles, the ui-sdk Textarea, Select (`form-pickers.tsx`), Combobox (`form-combobox.tsx`), DatePicker (`form-date.tsx`), Dialog (`overlay.tsx`), Menu, display pieces and icons
-- `src/islands/`: React islands inside Datastar pages (`Island.tsx`: the `<ds-island>` host; `select.tsx`, `date.tsx`, `multiselect.tsx`, `dialog.tsx`, `theme.tsx`: the islands, gathered in `islands.tsx`; `client.tsx`: the browser entry; `loaders.ts`, `mount.tsx`: the code it loads on demand)
-- `src/reactivity/`: `Reactivity` across processes (`Broadcast`, `DistributedReactivity`, `SqliteBroadcast`), and `Payload.ts` for invalidations that say what changed
-- `src/metrics/Metrics.ts`: counters, memory, CPU and event-loop delay for load tests (`GET /_metrics` with `METRICS=1`)
-- `src/app/`: the `users`, `teams` and `tags` definitions (all tenant-scoped by `orgId`), the `Org` model, their assembly with the relations and the team page's members (`Resources.ts`), the JSON API (`Api.ts`), migrations and seed (`Db.ts`), the sign-in page (`Login.tsx`), the layout (`Layout.tsx`) and app composition (`App.tsx`)
-- `scripts/build.ts`: the esbuild + StyleX build (`npm run build`, `npm run dev`)
-- `scripts/load/`: the load harness (`npm run load`, see [docs/load.md](docs/load.md))
-- `test/`: unit, in-process HTTP, and browser (`test/e2e`) tests
+The repository is an npm workspaces monorepo (`packages/*` and `apps/*`), with automated package boundary and cycle checks in `test/boundaries.test.ts` (run by `npm test`):
+
+- `packages/datastar/`: framework-agnostic Datastar primitives for Effect HTTP (no React dependency)
+  - `src/Datastar.ts`: patch events, SSE `respond` (handler error type must be `never`), schema-decoded `signals`
+  - `src/Attrs.ts`: signal paths checked against the signals schema, attribute helpers
+  - `src/Expr.ts`: Layer 1 — `Signals.from`, `Expr`, `Signal`, `Action`, `E`, `el`/`evt`
+  - `src/Slot.ts`: Layer 3 — renderer-agnostic `Slot.make` and `Slot.keyed`
+  - `src/View.ts`: Layer 4 — `View.make`, `View.action`, `View.live`
+  - `src/Endpoint.ts`: route plus typed client action (`remove.call({ id })` produces `@delete('/users/3')`)
+  - `src/Flash.ts`, `src/Shared.ts`, `src/Metrics.ts`, `client/datastar.js`
+- `packages/reactivity/`: cross-process `Reactivity` (`Broadcast`, `DistributedReactivity`, `SqliteBroadcast`, `Payload`)
+- `packages/ui/`: React + StyleX design system, islands, and Datastar JSX runtime
+  - `src/jsx-runtime.ts`, `src/jsx-dev-runtime.ts`: Layer 2 — `@jsxImportSource @effect-datastar/ui`
+  - `src/Slot.tsx`: Layer 3 — React `reactSlot` and `keyedSlot`
+  - `src/Html.ts`: React element to HTML string (`render` for patches, `document` for pages)
+  - `src/theme/`, `src/islands/`, and UI components (`Button`, `form*`, `overlay`, `menu`, `display`, `icons`)
+- `packages/crud/`: schema-driven CRUD generator (`Resource.ts` + `src/resource/*`, `Query.ts`, `Repo.ts`, `ManyToMany.ts`, `Lookup.ts`, `Field.ts`, `Form.ts`, `Schemas.ts`, `components.tsx`, `Bulk.tsx`, `UrlState.ts`, `Feedback.tsx`, `Api.ts`, `Scope.ts`)
+- `apps/demo/`: multi-tenant users/teams/tags CRUD app (`src/app/`, `src/auth/`, `scripts/build.ts`, `scripts/load/`, `test/`, `test/e2e/`)
+- `apps/board/`: live Kanban board app showcasing all 4 Datastar DSL layers (`src/BoardStore.ts`, `src/BoardView.tsx`, `src/App.tsx`, `scripts/build.ts`, `test/board.test.ts`)
+- `scripts/build-app.ts`: shared esbuild + StyleX + islands + `datastar.js` app build helper (`createAppBuild`)
+- `test/boundaries.test.ts`: enforces monorepo package boundaries (no `packages/` → `apps/` imports, no relative escapes, declared workspace deps, acyclic dependency graph)
 
 ## Stack
 
