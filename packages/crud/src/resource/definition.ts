@@ -38,12 +38,13 @@ export const define = <
   const Filters extends { readonly [K in Fields<M>]?: Query.Operator },
   const TC extends Fields<M> = never,
   T = never,
-  L = never
->(config: Config<Name, M, Id, Sortable, Filters & Record<string, Query.Operator>, TC, T, L>) => {
+  L = never,
+  A = never
+>(config: Config<Name, M, Id, Sortable, Filters & Record<string, Query.Operator>, TC, T, L, A>) => {
   type FK = Query.Keys<Filters>
   type Row = M["Type"]
   type IdType = M["fields"][Id]["Type"]
-  const ctx = resolve<Name, M, Id, Sortable, Filters, TC, T, L>(config)
+  const ctx = resolve<Name, M, Id, Sortable, Filters, TC, T, L, A>(config)
   const tenant = config.tenant
   const layer = ctx.layerWith([])
 
@@ -68,6 +69,8 @@ export const define = <
       column: tenant.column,
       id: Effect.map(Effect.service(tenant.service), (s): M["Type"][TC] => s.id)
     },
+    /** Authorization policy, if configured (e.g. for `Api.make`). */
+    authorize: ctx.authorize,
     /** What a relation to this resource checks against the current tenant. */
     reference: ctx.reference,
     /** Type-level only: the tenant service this resource's `Repo` and `Lookup` need. */
@@ -128,9 +131,10 @@ export const define = <
       | SectionRequires<S[number]>
       | T
       | L
+      | A
       | RelationTenants<R>
       | RelationTenants<MM>,
-      ReturnType<typeof build<Name, M, Id, Sortable, FK, T, L, typeof base>>["resource"]
+      ReturnType<typeof build<Name, M, Id, Sortable, FK, T, L, A, typeof base>>["resource"]
     > = {
       name: ctx.name,
       layer: references.length === 0 ? layer : ctx.layerWith(references),

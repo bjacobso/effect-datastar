@@ -1,4 +1,5 @@
-import { CurrentOrg } from "../auth/Auth.ts"
+import { CurrentOrg, CurrentUser } from "../auth/Auth.ts"
+import * as Policy from "@effect-datastar/crud/Policy.ts"
 import * as Resource from "@effect-datastar/crud/Resource.ts"
 import { Layout } from "./Layout.tsx"
 import { Tag } from "./Tag.ts"
@@ -21,5 +22,10 @@ export const Tags = Resource.define({
   },
   // Every row belongs to the signed-in account's organization (see `crud/Scope.ts`).
   tenant: { column: "orgId", service: CurrentOrg },
+  authorize: Policy.byRole(CurrentUser, (u) => u.role, {
+    admin: "*",
+    member: ["read"],
+    viewer: ["read"]
+  }),
   layout: Layout
 })

@@ -18,8 +18,9 @@ import { render } from "@effect-datastar/ui/Html.ts"
 import { Context, Effect, Stream } from "effect"
 import type { SqlError } from "effect/sql"
 import type * as Components from "../components.tsx"
-import { unexpected } from "../Feedback.tsx"
+import { toast, unexpected } from "../Feedback.tsx"
 import type * as Lookup from "../Lookup.ts"
+import * as Policy from "../Policy.ts"
 import type * as Query from "../Query.ts"
 import type * as Repo from "../Repo.ts"
 import type { Wired } from "./context.ts"
@@ -35,11 +36,12 @@ export const make = <
   FK extends string,
   T,
   L,
+  A,
   QK extends string
 >(
-  w: Wired<Name, M, Id, Sortable, FK, T, L>,
-  t: Model<Name, M, Id, Sortable, FK, T, L, QK>,
-  views: Views<Name, M, Id, Sortable, FK, T, L, QK>
+  w: Wired<Name, M, Id, Sortable, FK, T, L, A>,
+  t: Model<Name, M, Id, Sortable, FK, NoInfer<T>, NoInfer<L>, NoInfer<A>, QK>,
+  views: Views<Name, M, Id, Sortable, FK, NoInfer<T>, NoInfer<L>, NoInfer<A>, QK>
 ) => {
   type Row = M["Type"]
   type Q = Query.ListQuery<Sortable, QK>
@@ -59,7 +61,8 @@ export const make = <
     services: ReadonlyArray<readonly [string, Lookup.Lookup<T>]>,
     q: Q,
     full: Query.ListQuery<Sortable, FK>,
-    lock: Lock
+    lock: Lock,
+    caps: Policy.Capabilities
   ): Effect.Effect<Shared.Source, never, T> =>
     Effect.gen(function*() {
       const context = yield* Effect.context<T>()
@@ -81,7 +84,7 @@ export const make = <
         if (cached !== undefined) return cached
         if (clamp !== undefined) return [Datastar.patchSignals({ [ns]: { query: { page: clamp } } })]
         if (current === undefined) return undefined
-        lastTable ??= render(<TableView page={current} current={q} lookups={lookups} lock={lock} />)
+        lastTable ??= render(<TableView page={current} current={q} lookups={lookups} lock={lock} capabilities={caps} />)
         // The ids on this page, for "select all" and pruning the selection (see `Bulk`),
         // and for a new tab the canonical URL (see `UrlState`).
         const local: Record<string, unknown> = { _page: w.pageIds(current.rows) }
@@ -123,7 +126,9 @@ export const make = <
             if (current) current = { ...current, rows: current.rows.map((row) => byId.get(row[w.idColumn]) ?? row) }
             lastTable = undefined
             // Only these rows changed, in ways that can't move them: patch each `<tr>` by id.
-            return event.rows.map((row) => Datastar.patchElements(render(<RowView row={row} lookups={lookups} lock={lock} />)))
+            return event.rows.map((row) =>
+              Datastar.patchElements(render(<RowView row={row} lookups={lookups} lock={lock} capabilities={caps} />))
+            )
           }
           const page = event.page
           if (page.page > page.pages) {
@@ -133,7 +138,7 @@ export const make = <
           }
           clamp = undefined
           current = page
-          const table = render(<TableView page={page} current={q} lookups={lookups} lock={lock} />)
+          const table = render(<TableView page={page} current={q} lookups={lookups} lock={lock} capabilities={caps} />)
           // Send only what the tabs don't have. A re-query often renders the same table
           // (an insert that a filter excludes, a renamed tag the page doesn't show), or the
           // same rows with a new total (an insert that sorts onto another page): then
@@ -163,21 +168,23 @@ export const make = <
     })
 
   /** The live view of this table for the request's query (and the lock, for an embed). */
-  return (lock: Lock): Stream.Stream<Datastar.Events, never, Requires<Name, T>> =>
+  return (lock: Lock): Stream.Stream<Datastar.Events, never, Requires<Name, T, A>> =>
     Stream.unwrap(Effect.gen(function*() {
+      const caps = yield* w.capabilities
+      if (!caps.read) return Stream.fromEffect(Effect.succeed([toast(`Not allowed to read ${w.noun}s`, "error")] as ReadonlyArray<Datastar.DatastarEvent>))
       const repo = yield* w.Repo
       const services = yield* w.relationServices
       const q = yield* t.readQuery
       const full = spec.full(q, lock)
-      // Identical views share one source (see `Shared`): the same tenant, lock and query.
+      // Identical views share one source (see `Shared`): the same tenant, capabilities, lock and query.
       // The source runs with this request's tenant service only, so it doesn't hold on to
-      // the request, and a view of another tenant never shares it (its key differs).
+      // the request, and a view of another tenant or capability set never shares it.
       const tenantKey = w.scope === undefined ? null : (yield* w.scope.value).encoded
-      const key = JSON.stringify([tenantKey, lock ?? null, q])
+      const key = JSON.stringify([tenantKey, Policy.capabilitiesKey(caps), lock ?? null, q])
       const tenantOnly = w.tenant === undefined
         ? Context.empty()
         : Context.pick(w.tenant.service)(yield* Effect.context<T>())
-      const source = sharedSource(repo, services, q, full, lock).pipe(
+      const source = sharedSource(repo, services, q, full, lock, caps).pipe(
         Effect.provideContext(tenantOnly as Context.Context<T>)
       )
       return Shared.subscribe(hubs, key, source)

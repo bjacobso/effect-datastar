@@ -11,10 +11,11 @@
  * Internal to the resource modules.
  */
 import * as Flash from "@effect-datastar/datastar/Flash.ts"
-import { Alert } from "@effect-datastar/ui/display.tsx"
+import { Alert, Card, EmptyState } from "@effect-datastar/ui/display.tsx"
 import { Effect, type Layer, Option } from "effect"
 import { HttpRouter } from "effect/http"
 import * as Components from "../components.tsx"
+import type * as Policy from "../Policy.ts"
 import type * as Query from "../Query.ts"
 import type * as Repo from "../Repo.ts"
 import * as Bulk from "./bulk.ts"
@@ -36,9 +37,10 @@ export const build = <
   FK extends string,
   T,
   L,
+  A,
   Base
 >(
-  ctx: Ctx<Name, M, Id, Sortable, FK, T, L>,
+  ctx: Ctx<Name, M, Id, Sortable, FK, T, L, A>,
   /** What a definition exposes (see `definition.ts`), kept in the assembled resource. */
   base: Base,
   relations: ReadonlyArray<readonly [string, LookupTag]>,
@@ -50,7 +52,7 @@ export const build = <
   const w = wire(ctx, relations)
   const { name, prefix, query } = w
 
-  const tables: Endpoints.Tables<IdType, Table.Requires<Name, T>> = { list: undefined, embeds: new Map() }
+  const tables: Endpoints.Tables<IdType, Table.Requires<Name, T, A>> = { list: undefined, embeds: new Map() }
   const endpoints = Endpoints.make(w, tables)
 
   /** A table: the list page's, or an embed's. */
@@ -59,7 +61,7 @@ export const build = <
     const views = View.make(w, t, endpoints)
     const rows = Rows.make(w, t)
     const bulk = Bulk.make(w, t)
-    const handlers: Table.Handlers<IdType, Table.Requires<Name, T>> = {
+    const handlers: Table.Handlers<IdType, Table.Requires<Name, T, A>> = {
       view: Live.make(w, t, views),
       save: rows.save,
       edit: rows.edit,
@@ -81,9 +83,10 @@ export const build = <
     readonly initial?: { readonly page: Repo.Page<Row>; readonly lookups: Components.Lookups } | undefined
     /** A toast carried over a redirect (e.g. "Deleted" after a delete on the detail page). */
     readonly flash?: Flash.Flash | undefined
+    readonly capabilities?: Policy.Capabilities | undefined
   }) => (
     <main>
-      <list.views.View query={props.query} lock={undefined} initial={props.initial} />
+      <list.views.View query={props.query} lock={undefined} initial={props.initial} capabilities={props.capabilities} />
       <Components.Toast message={props.flash?.message} kind={props.flash?.kind} />
     </main>
   )
@@ -92,6 +95,25 @@ export const build = <
     "GET",
     prefix,
     Effect.gen(function*() {
+      const caps = yield* w.capabilities
+      if (!caps.read) {
+        return yield* html(
+          w.layout({
+            title: "Forbidden",
+            active: prefix,
+            children: (
+              <main>
+                <Card>
+                  <EmptyState icon="alert" title="Forbidden">
+                    {`You do not have permission to view ${w.title.toLowerCase()}.`}
+                  </EmptyState>
+                </Card>
+              </main>
+            )
+          }),
+          403
+        )
+      }
       const params = yield* searchParams
       const q = query.fromSearchParams(params)
       const initial = yield* list.views.initial(q, undefined)
@@ -100,8 +122,8 @@ export const build = <
         title: w.title,
         active: prefix,
         children: initial._tag === "Some"
-          ? <Page query={initial.value.query} initial={initial.value} flash={flash} />
-          : <Page query={q} flash={flash} />
+          ? <Page query={initial.value.query} initial={initial.value} flash={flash} capabilities={caps} />
+          : <Page query={q} flash={flash} capabilities={caps} />
       }))
       return flash === undefined ? response : Flash.clear(response)
     })
@@ -125,14 +147,16 @@ export const build = <
     tables.embeds.set(embed.name, { table: embedded.handlers, parse: locked.parse })
     embedSections.set(embed.name, (value) =>
       Effect.gen(function*() {
+        const caps = yield* w.capabilities
+        if (!caps.read) return null
         const lock = locked.parse(String(value))
         if (lock === undefined) {
           return <Alert tone="danger">{`Cannot show ${embed.title}: invalid ${embed.lock}.`}</Alert>
         }
         const initial = yield* embedded.views.initial(locked.initial, lock)
         return initial._tag === "Some"
-          ? <embedded.views.View query={initial.value.query} lock={lock} initial={initial.value} />
-          : <embedded.views.View query={locked.initial} lock={lock} />
+          ? <embedded.views.View query={initial.value.query} lock={lock} initial={initial.value} capabilities={caps} />
+          : <embedded.views.View query={locked.initial} lock={lock} capabilities={caps} />
       }))
   }
 

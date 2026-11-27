@@ -74,7 +74,7 @@ const LoginPage = (props: { readonly next: string }) => (
     </Card>
     <p {...stylex.props(styles.hint)}>
       {`Demo accounts (password "${demoAccounts[0].password}"): `}
-      {demoAccounts.map((a) => `${a.email} (${a.org})`).join(", ")}
+      {demoAccounts.map((a) => `${a.email} (${a.org}, ${a.role})`).join(", ")}
     </p>
   </main>
 )

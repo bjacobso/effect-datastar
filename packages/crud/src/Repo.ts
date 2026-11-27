@@ -60,6 +60,7 @@ import * as Payload from "@effect-datastar/reactivity/Payload.ts"
 import type { Model } from "effect/schema"
 import { SqlClient, SqlModel } from "effect/sql"
 import type { SqlError } from "effect/sql"
+import * as Dialect from "./Dialect.ts"
 import * as Field from "./Field.ts"
 import * as ManyToMany from "./ManyToMany.ts"
 import type { ListQuery, QueryDef } from "./Query.ts"
@@ -262,6 +263,10 @@ export const make = <
     type RowId = S["fields"][Id]["Type"]
     const sql = yield* SqlClient.SqlClient
     const reactivity = yield* Reactivity.Reactivity
+    const dialect = Option.getOrElse(
+      yield* Effect.serviceOption(Dialect.SqlDialect),
+      () => Dialect.SqliteDialect
+    )
     const base = yield* SqlModel.makeRepository(model, {
       tableName: options.table,
       spanPrefix: options.table,
@@ -281,9 +286,9 @@ export const make = <
     const linkKeys = new Set(links.map((l) => l.key))
     const selectRows = links.length === 0
       ? sql`SELECT * FROM ${table}`
-      : sql`SELECT ${table}.*, ${sql.csv(links.map((l) => ManyToMany.select(sql, l, options.table, options.idColumn)))} FROM ${table}`
+      : sql`SELECT ${table}.*, ${sql.csv(links.map((l) => ManyToMany.select(sql, l, options.table, options.idColumn, dialect)))} FROM ${table}`
     const decode = (rows: ReadonlyArray<object>) =>
-      decodeRows(ManyToMany.parse(links, rows as ReadonlyArray<Record<string, unknown>>))
+      decodeRows(ManyToMany.parse(links, rows as ReadonlyArray<Record<string, unknown>>, dialect))
 
     // --- scope ---------------------------------------------------------------
 
@@ -317,9 +322,9 @@ export const make = <
           const encoded = yield* ref.encode(raw)
           const wanted = [...new Set(Array.isArray(encoded) ? encoded : [encoded])] as Array<string | number>
           if (wanted.length === 0) return
-          const found = yield* sql<{ n: number }>`SELECT COUNT(*) AS n FROM ${sql(ref.target.table)}
+          const found = yield* sql<{ n: number | string }>`SELECT COUNT(*) AS n FROM ${sql(ref.target.table)}
             WHERE ${sql.in(ref.target.idColumn, wanted)} AND ${sql(ref.tenantColumn)} = ${v.encoded}`
-          if ((found[0]?.n ?? 0) !== wanted.length) return yield* Effect.fail(new InvalidReference({ column: ref.column }))
+          if (dialect.decodeCount(found[0]?.n) !== wanted.length) return yield* Effect.fail(new InvalidReference({ column: ref.column }))
         }), { discard: true })
     /** `value` with the tenant column set to the current tenant. */
     const withTenant = <A,>(value: A, v: Current): A =>
@@ -331,9 +336,9 @@ export const make = <
         const [rows, counted] = yield* Effect.all([
           sql`${selectRows} ${where} ${options.query.orderBy(sql, q, options.idColumn)}
               LIMIT ${q.pageSize} OFFSET ${(q.page - 1) * q.pageSize}`,
-          sql<{ total: number }>`SELECT COUNT(*) AS total FROM ${table} ${where}`
+          sql<{ total: number | string }>`SELECT COUNT(*) AS total FROM ${table} ${where}`
         ], { concurrency: "unbounded" })
-        const total = counted[0]?.total ?? 0
+        const total = dialect.decodeCount(counted[0]?.total)
         return {
           rows: yield* decode(rows),
           total,
@@ -408,7 +413,7 @@ export const make = <
           ? undefined
           : (yield* encodeRow(mode.before)) as Record<string, ReadonlyArray<unknown>>
         for (const [link, ids] of linked) {
-          yield* ManyToMany.write(sql, link, saved[options.idColumn], ids, mode.fresh ? [] : previous?.[link.key], joinExtra(link, v))
+          yield* ManyToMany.write(sql, link, saved[options.idColumn], ids, mode.fresh ? [] : previous?.[link.key], joinExtra(link, v), dialect)
           saved[link.key] = JSON.stringify(ManyToMany.canonical(ids))
         }
         const [decoded] = yield* decode([saved])
@@ -629,7 +634,7 @@ export const make = <
             ).pipe(
               Effect.as("done" as const),
               Effect.catchTag("SqlError", (e) =>
-                e.reason._tag === "ConstraintError" ? Effect.succeed("restricted" as const) : Effect.fail(e))
+                dialect.isForeignKeyRestrict(e) ? Effect.succeed("restricted" as const) : Effect.fail(e))
             )
             ;(outcome === "done" ? done : restricted).push(id)
           }

@@ -20,8 +20,8 @@ import type { Fields, IdKey, ModelLike } from "./types.ts"
  * How a field's value is shown: a custom cell, a linked relation label, chips, or the
  * linked display column. `undefined`: the plain value (`Components.CellValue`).
  */
-export const cell = <Name extends string, M extends ModelLike, Id extends IdKey<M>, Sortable extends Fields<M>, FK extends string, T, L>(
-  w: Wired<Name, M, Id, Sortable, FK, T, L>,
+export const cell = <Name extends string, M extends ModelLike, Id extends IdKey<M>, Sortable extends Fields<M>, FK extends string, T, L, A = never>(
+  w: Wired<Name, M, Id, Sortable, FK, T, L, A>,
   field: Field.FieldInfo,
   lookups: Components.Lookups,
   options: { readonly link: boolean }

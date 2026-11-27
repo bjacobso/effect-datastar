@@ -18,6 +18,7 @@ import { render } from "@effect-datastar/ui/Html.ts"
 import { Effect, Schema } from "effect"
 import * as Bulk from "../Bulk.tsx"
 import * as Components from "../components.tsx"
+import * as Policy from "../Policy.ts"
 import type * as Query from "../Query.ts"
 import type * as Repo from "../Repo.ts"
 import * as UrlState from "../UrlState.ts"
@@ -35,11 +36,12 @@ export const make = <
   FK extends string,
   T,
   L,
+  A,
   QK extends string
 >(
-  w: Wired<Name, M, Id, Sortable, FK, T, L>,
-  t: Model<Name, M, Id, Sortable, FK, T, L, QK>,
-  endpoints: TableEndpoints<Name, M, Id, Sortable, FK, T, L>
+  w: Wired<Name, M, Id, Sortable, FK, T, L, A>,
+  t: Model<Name, M, Id, Sortable, FK, NoInfer<T>, NoInfer<L>, NoInfer<A>, QK>,
+  endpoints: TableEndpoints<Name, M, Id, Sortable, FK, NoInfer<T>, NoInfer<L>, NoInfer<A>>
 ) => {
   type Row = M["Type"]
   type Q = Query.ListQuery<Sortable, QK>
@@ -91,14 +93,30 @@ export const make = <
   }
 
   const rowId = (row: Row) => `${ns}-${String(row[w.idColumn])}`
-  const actions = (lock: Lock) => (row: Row) => {
-    const id = String(row[w.idColumn])
-    return (
-      <Components.RowActions
-        edit={edit.call({ id }, { search: search(lock) })}
-        remove={Action.confirm(`Delete ${w.label(row)}?`, remove.call({ id }, { search: search(lock) }))}
-      />
-    )
+  const actions = (lock: Lock, caps: Policy.Capabilities) => {
+    if (!caps.update && !caps.delete) return undefined
+    return (row: Row) => {
+      const id = String(row[w.idColumn])
+      const editAction = edit.call({ id }, { search: search(lock) })
+      const removeAction = Action.confirm(`Delete ${w.label(row)}?`, remove.call({ id }, { search: search(lock) }))
+      if (caps.update && caps.delete) {
+        return <Components.RowActions edit={editAction} remove={removeAction} />
+      }
+      return (
+        <span {...stylex.props(styles.actions)}>
+          {caps.update && (
+            <Button variant="ghost" size="sm" icon="edit" {...ds.on("click", Action.raw(editAction).toExpr())}>
+              Edit
+            </Button>
+          )}
+          {caps.delete && (
+            <Button variant="ghost" size="sm" icon="trash" {...ds.on("click", removeAction.toExpr())}>
+              Delete
+            </Button>
+          )}
+        </span>
+      )
+    }
   }
 
   const select: Components.Select<Row> = {
@@ -107,59 +125,73 @@ export const make = <
   }
 
   /** A single row, as rendered in the table (same id), for row-level patches. */
-  const RowView = (props: { readonly row: Row; readonly lookups: Components.Lookups; readonly lock: Lock }) => (
-    <Components.TableRow
-      row={props.row}
-      columns={columnsFor(props.lookups)}
-      rowId={rowId}
-      actions={actions(props.lock)}
-      select={select}
-    />
-  )
+  const RowView = (props: {
+    readonly row: Row
+    readonly lookups: Components.Lookups
+    readonly lock: Lock
+    readonly capabilities?: Policy.Capabilities | undefined
+  }) => {
+    const caps = props.capabilities ?? Policy.allCapabilities
+    return (
+      <Components.TableRow
+        row={props.row}
+        columns={columnsFor(props.lookups)}
+        rowId={rowId}
+        actions={actions(props.lock, caps)}
+        select={caps.bulk ? select : undefined}
+      />
+    )
+  }
 
   const TableView = (props: {
     readonly page: Repo.Page<Row>
     readonly current: { readonly sort: string; readonly dir: Query.Dir }
     readonly lookups: Components.Lookups
     readonly lock: Lock
-  }) => (
-    <Components.TablePanel id={`${ns}-table`}>
-      <Bulk.Bar
-        id={`${ns}-bulk`}
-        paths={bulkPaths}
-        plural={`${w.noun}s`}
-        setters={t.setFields.map((f) => ({
-          key: f.key,
-          label: f.label,
-          options: Components.fieldOptions(f, props.lookups[f.key]),
-          nullable: f.nullable
-        }))}
-        update={bulkUpdate.call(undefined, {
-          include: [path("selection"), path("bulk")],
-          search: search(props.lock)
-        })}
-        remove={bulkRemove.call(undefined, { include: [path("selection")], search: search(props.lock) })}
-      />
-      <Components.Table
-        id={`${ns}-rows`}
-        columns={columnsFor(props.lookups)}
-        rows={props.page.rows}
-        rowId={rowId}
-        query={path("query")}
-        current={props.current}
-        actions={actions(props.lock)}
-        select={select}
-      />
-      <Components.Pagination
-        id={paginationId}
-        query={path("query")}
-        page={props.page.page}
-        pages={props.page.pages}
-        total={props.page.total}
-        pageSizes={w.query.pageSizes}
-      />
-    </Components.TablePanel>
-  )
+    readonly capabilities?: Policy.Capabilities | undefined
+  }) => {
+    const caps = props.capabilities ?? Policy.allCapabilities
+    return (
+      <Components.TablePanel id={`${ns}-table`}>
+        {caps.bulk && (
+          <Bulk.Bar
+            id={`${ns}-bulk`}
+            paths={bulkPaths}
+            plural={`${w.noun}s`}
+            setters={t.setFields.map((f) => ({
+              key: f.key,
+              label: f.label,
+              options: Components.fieldOptions(f, props.lookups[f.key]),
+              nullable: f.nullable
+            }))}
+            update={bulkUpdate.call(undefined, {
+              include: [path("selection"), path("bulk")],
+              search: search(props.lock)
+            })}
+            remove={bulkRemove.call(undefined, { include: [path("selection")], search: search(props.lock) })}
+          />
+        )}
+        <Components.Table
+          id={`${ns}-rows`}
+          columns={columnsFor(props.lookups)}
+          rows={props.page.rows}
+          rowId={rowId}
+          query={path("query")}
+          current={props.current}
+          actions={actions(props.lock, caps)}
+          select={caps.bulk ? select : undefined}
+        />
+        <Components.Pagination
+          id={paginationId}
+          query={path("query")}
+          page={props.page.page}
+          pages={props.page.pages}
+          total={props.page.total}
+          pageSizes={w.query.pageSizes}
+        />
+      </Components.TablePanel>
+    )
+  }
 
   const editorSig = Signals.from(
     Schema.Struct({
@@ -205,7 +237,13 @@ export const make = <
    * live stream then takes over. Carries its own `data-signals`, so it can sit
    * inside any page.
    */
-  const View = (props: { readonly query: Q; readonly lock: Lock; readonly initial?: Initial | undefined }) => {
+  const View = (props: {
+    readonly query: Q
+    readonly lock: Lock
+    readonly initial?: Initial | undefined
+    readonly capabilities?: Policy.Capabilities | undefined
+  }) => {
+    const caps = props.capabilities ?? Policy.allCapabilities
     const liveCall = view.call(undefined, { include: [path("query")], search: search(props.lock) })
     const openCreate = Action.seq(
       draftSig.set(t.blankDraft),
@@ -242,9 +280,11 @@ export const make = <
           {spec.heading === "h1"
             ? <h1 {...stylex.props(styles.h1)}>{spec.title}</h1>
             : <h2 {...stylex.props(styles.h2)}>{spec.title}</h2>}
-          <Button variant="primary" icon="plus" {...ds.on("click", openCreate.toExpr())}>
-            {`New ${w.noun}`}
-          </Button>
+          {caps.create && (
+            <Button variant="primary" icon="plus" {...ds.on("click", openCreate.toExpr())}>
+              {`New ${w.noun}`}
+            </Button>
+          )}
         </header>
         <Components.FilterBar prefix={ns} filters={spec.query.filters} query={path("query")} lookups={props.initial?.lookups} />
         <div
@@ -252,10 +292,18 @@ export const make = <
           $init={liveCall}
           $onSignalPatch={{ run: liveCall, include: [path("query")], debounce: "200ms" }}
           // Here, not on the section: an element has one `data-effect`, and the section's keeps the URL.
-          $effect={Bulk.prune(bulkPaths)}
+          $effect={caps.bulk ? Bulk.prune(bulkPaths) : undefined}
         >
           {props.initial
-            ? <TableView page={props.initial.page} current={props.query} lookups={props.initial.lookups} lock={props.lock} />
+            ? (
+              <TableView
+                page={props.initial.page}
+                current={props.query}
+                lookups={props.initial.lookups}
+                lock={props.lock}
+                capabilities={caps}
+              />
+            )
             : (
               <Components.TablePanel id={`${ns}-table`} busy>
                 <div {...stylex.props(styles.loading)}>
@@ -264,7 +312,7 @@ export const make = <
               </Components.TablePanel>
             )}
         </div>
-        <Dialog lock={props.lock} lookups={props.initial?.lookups} />
+        {(caps.create || caps.update) && <Dialog lock={props.lock} lookups={props.initial?.lookups} />}
       </section>
     )
   }
@@ -305,5 +353,6 @@ export type Views<
   FK extends string,
   T,
   L,
+  A,
   QK extends string
-> = ReturnType<typeof make<Name, M, Id, Sortable, FK, T, L, QK>>
+> = ReturnType<typeof make<Name, M, Id, Sortable, FK, T, L, A, QK>>

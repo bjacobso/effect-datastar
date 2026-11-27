@@ -21,10 +21,11 @@ export const make = <
   FK extends string,
   T,
   L,
+  A,
   QK extends string
 >(
-  w: Wired<Name, M, Id, Sortable, FK, T, L>,
-  t: Model<Name, M, Id, Sortable, FK, T, L, QK>
+  w: Wired<Name, M, Id, Sortable, FK, T, L, A>,
+  t: Model<Name, M, Id, Sortable, FK, T, L, A, QK>
 ) => {
   type IdType = M["fields"][Id]["Type"]
   const { lockKey, ns } = t
@@ -32,6 +33,7 @@ export const make = <
 
   const save = (id: IdType | undefined, lock: Lock) =>
     Effect.gen(function*() {
+      yield* w.require(id === undefined ? "create" : "update")
       const repo = yield* w.Repo
       const raw = yield* t.readDraft
       // The lock and tenant are not in the form; the server sets them (and ignores any sent value).
@@ -45,6 +47,7 @@ export const make = <
       return [t.closeDialog, toast(`${id === undefined ? "Created" : "Saved"} ${w.label(row)}`)]
     }).pipe(
       Effect.catchTags({
+        Forbidden: (e) => Effect.succeed(toast(e.message, "error")),
         SchemaError: (e) => Effect.succeed(t.fieldErrors(Form.errors(t.keys, e))),
         SqlError: t.saveError,
         SignalsError: unexpected,
@@ -59,23 +62,31 @@ export const make = <
 
   const edit = (id: IdType, lock: Lock) =>
     Effect.gen(function*() {
+      yield* w.require("update")
       const row = yield* t.findInScope(id, lock)
       const draft = Object.fromEntries(
         Object.entries(Form.toDraft(model.jsonUpdate, row, row[idColumn])).filter(([k]) => !t.serverOwned(k))
       )
       return Datastar.patchSignals({ [ns]: { dialog: true, draft, errors: t.noErrors } })
     }).pipe(
-      Effect.catchTags({ NoSuchElementError: w.goneToast, SchemaError: unexpected, SqlError: unexpected })
+      Effect.catchTags({
+        Forbidden: (e) => Effect.succeed(toast(e.message, "error")),
+        NoSuchElementError: w.goneToast,
+        SchemaError: unexpected,
+        SqlError: unexpected
+      })
     )
 
   const remove = (id: IdType, lock: Lock, deleted: Datastar.Events) =>
     Effect.gen(function*() {
+      yield* w.require("delete")
       const repo = yield* w.Repo
       if (lock !== undefined) yield* t.findInScope(id, lock)
       yield* repo.delete(id)
       return deleted
     }).pipe(
       Effect.catchTags({
+        Forbidden: (e) => Effect.succeed(toast(e.message, "error")),
         SqlError: (e) =>
           e.reason._tag === "ConstraintError"
             ? Effect.succeed(toast(w.messages.deleteRestricted ?? `This ${w.noun} is still referenced elsewhere.`, "error"))

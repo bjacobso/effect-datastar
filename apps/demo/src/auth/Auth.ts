@@ -22,11 +22,15 @@ import * as Password from "./Password.ts"
 export const AccountId = Schema.Int.pipe(Schema.brand("AccountId"))
 export type AccountId = typeof AccountId.Type
 
+export const AccountRole = Schema.Literals(["admin", "member", "viewer"])
+export type AccountRole = typeof AccountRole.Type
+
 /** The signed-in account. */
 export class CurrentUser extends Context.Service<CurrentUser, {
   readonly id: AccountId
   readonly email: string
   readonly name: string
+  readonly role: AccountRole
   readonly orgId: OrgId
 }>()("effect-datastar/auth/CurrentUser") {}
 
@@ -48,6 +52,7 @@ const SessionRow = Schema.Struct({
   id: AccountId,
   email: Schema.String,
   name: Schema.String,
+  role: AccountRole,
   orgId: OrgId,
   orgName: Schema.String
 })
@@ -56,7 +61,7 @@ const decodeSession = Schema.decodeUnknownEffect(Schema.Array(SessionRow))
 const decodeAccount = Schema.decodeUnknownEffect(Schema.Array(AccountRow))
 
 const toSession = (row: typeof SessionRow.Type): Session => ({
-  user: { id: row.id, email: row.email, name: row.name, orgId: row.orgId },
+  user: { id: row.id, email: row.email, name: row.name, role: row.role, orgId: row.orgId },
   org: { id: row.orgId, name: row.orgName }
 })
 
@@ -85,7 +90,7 @@ export class Sessions extends Context.Service<Sessions, {
       const signIn = (email: string, password: string) =>
         Effect.gen(function*() {
           const rows = yield* sql`
-            SELECT a.id, a.email, a.name, a.orgId, o.name AS orgName, a.passwordHash
+            SELECT a.id, a.email, a.name, a.role, a.orgId, o.name AS orgName, a.passwordHash
             FROM accounts a JOIN orgs o ON o.id = a.orgId
             WHERE a.email = ${email.trim()}`.pipe(Effect.flatMap(decodeAccount))
           const account = rows[0]
@@ -111,7 +116,7 @@ export class Sessions extends Context.Service<Sessions, {
           ? Effect.succeedNone
           : Effect.gen(function*() {
             const rows = yield* sql`
-              SELECT a.id, a.email, a.name, a.orgId, o.name AS orgName
+              SELECT a.id, a.email, a.name, a.role, a.orgId, o.name AS orgName
               FROM sessions s JOIN accounts a ON a.id = s.accountId JOIN orgs o ON o.id = a.orgId
               WHERE s.tokenHash = ${tokenHash(token)} AND s.expiresAt > ${yield* now}`.pipe(Effect.flatMap(decodeSession))
             return Option.map(Option.fromNullishOr(rows[0]), toSession)

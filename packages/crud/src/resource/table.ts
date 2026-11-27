@@ -26,8 +26,8 @@ import type { Fields, IdKey, LookupOf, ModelLike, RepoOf } from "./types.ts"
 /** An embed's lock value (validated), or `undefined` for the list page's table. */
 export type Lock = string | undefined
 
-/** What a table's routes need: its repo, the relations' lookups, the request and the tenant. */
-export type Requires<Name extends string, T> = RepoOf<Name> | LookupOf<string> | HttpServerRequest.HttpServerRequest | T
+/** What a table's routes need: its repo, the relations' lookups, the request, the tenant and the policy. */
+export type Requires<Name extends string, T, A = never> = RepoOf<Name> | LookupOf<string> | HttpServerRequest.HttpServerRequest | T | A
 
 /** The handlers behind a table's routes. */
 export interface Handlers<IdType, R> {
@@ -67,8 +67,9 @@ export const model = <
   FK extends string,
   T,
   L,
+  A,
   QK extends string
->(w: Wired<Name, M, Id, Sortable, FK, T, L>, spec: Spec<Sortable, QK, FK>) => {
+>(w: Wired<Name, M, Id, Sortable, FK, T, L, A>, spec: Spec<Sortable, QK, FK>) => {
   type Row = M["Type"]
   type IdType = M["fields"][Id]["Type"]
   const { ns, lockKey } = spec
@@ -176,5 +177,6 @@ export type Model<
   FK extends string,
   T,
   L,
+  A,
   QK extends string
-> = ReturnType<typeof model<Name, M, Id, Sortable, FK, T, L, QK>>
+> = ReturnType<typeof model<Name, M, Id, Sortable, FK, T, L, A, QK>>
