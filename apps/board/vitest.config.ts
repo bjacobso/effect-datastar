@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [stylex({ devMode: "css-only" })],
   test: {
     name: "board",
-    include: ["test/**/*.test.{ts,tsx}"]
+    include: ["test/**/*.test.{ts,tsx}"],
+    exclude: ["test/e2e/**"]
   }
 })

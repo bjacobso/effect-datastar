@@ -344,6 +344,7 @@ export const makeBoardView = () => {
               const count = yield* store.countIn(card.column)
               return [
                 patchSignals({ title: "", error: "" }),
+                slots[card.column].removeItem(card.id),
                 slots[card.column].prepend(card),
                 countSlotFor(card.column).morph(count)
               ]
@@ -363,6 +364,7 @@ export const makeBoardView = () => {
               const toCount = yield* store.countIn(to)
               return [
                 slots[moved.from].removeItem(id),
+                slots[to].removeItem(id),
                 slots[to].prepend(moved.card),
                 countSlotFor(moved.from).morph(fromCount),
                 countSlotFor(to).morph(toCount)
