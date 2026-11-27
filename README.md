@@ -19,11 +19,12 @@ Requires Node 24+ (uses `node:sqlite`). For the browser tests, run `npx playwrig
 
 Demo accounts (seeded), all with the password `demo-password`:
 
-| Email               | Organization | Sees                                                |
-| ------------------- | ------------ | --------------------------------------------------- |
-| `ada@acme.test`     | Acme         | teams Platform, Growth, Design; 52 users; tags Remote, On call, Mentor, New hire, Contractor |
-| `grace@acme.test`   | Acme         | the same                                            |
-| `linus@globex.test` | Globex       | teams Infrastructure, Support; 35 users; tags Remote, Night shift, Lead |
+| Email               | Organization | Role   | Sees                                                |
+| ------------------- | ------------ | ------ | --------------------------------------------------- |
+| `ada@acme.test`     | Acme         | admin  | teams Platform, Growth, Design; 52 users; tags Remote, On call, Mentor, New hire, Contractor |
+| `grace@acme.test`   | Acme         | member | the same                                            |
+| `alan@acme.test`    | Acme         | viewer | the same (read-only)                                |
+| `linus@globex.test` | Globex       | admin  | teams Infrastructure, Support; 35 users; tags Remote, Night shift, Lead |
 
 ## Resources
 
@@ -397,13 +398,13 @@ The repository is an npm workspaces monorepo (`packages/*` and `apps/*`), with a
   - `src/View.ts`: Layer 4 — `View.make`, `View.action`, `View.live`
   - `src/Endpoint.ts`: route plus typed client action (`remove.call({ id })` produces `@delete('/users/3')`)
   - `src/Flash.ts`, `src/Shared.ts`, `src/Metrics.ts`, `client/datastar.js`
-- `packages/reactivity/`: cross-process `Reactivity` (`Broadcast`, `DistributedReactivity`, `SqliteBroadcast`, `Payload`)
+- `packages/reactivity/`: cross-process `Reactivity` (`Broadcast`, `DistributedReactivity`, `SqliteBroadcast`, `PostgresBroadcast.ts`, `Payload`)
 - `packages/ui/`: React + StyleX design system, islands, and Datastar JSX runtime
   - `src/jsx-runtime.ts`, `src/jsx-dev-runtime.ts`: Layer 2 — `@jsxImportSource @effect-datastar/ui`
   - `src/Slot.tsx`: Layer 3 — React `reactSlot` and `keyedSlot`
   - `src/Html.ts`: React element to HTML string (`render` for patches, `document` for pages)
   - `src/theme/`, `src/islands/`, and UI components (`Button`, `form*`, `overlay`, `menu`, `display`, `icons`)
-- `packages/crud/`: schema-driven CRUD generator (`Resource.ts` + `src/resource/*`, `Query.ts`, `Repo.ts`, `ManyToMany.ts`, `Lookup.ts`, `Field.ts`, `Form.ts`, `Schemas.ts`, `components.tsx`, `Bulk.tsx`, `UrlState.ts`, `Feedback.tsx`, `Api.ts`, `Scope.ts`)
+- `packages/crud/`: schema-driven CRUD generator (`Resource.ts` + `src/resource/*`, `Query.ts`, `Repo.ts`, `ManyToMany.ts`, `Lookup.ts`, `Field.ts`, `Form.ts`, `Schemas.ts`, `components.tsx`, `Bulk.tsx`, `UrlState.ts`, `Feedback.tsx`, `Api.ts`, `Scope.ts`, `Policy.ts`, `Dialect.ts`)
 - `apps/demo/`: multi-tenant users/teams/tags CRUD app (`src/app/`, `src/auth/`, `scripts/build.ts`, `scripts/load/`, `test/`, `test/e2e/`)
 - `apps/board/`: live Kanban board app showcasing all 4 Datastar DSL layers (`src/BoardStore.ts`, `src/BoardView.tsx`, `src/App.tsx`, `scripts/build.ts`, `test/board.test.ts`)
 - `scripts/build-app.ts`: shared esbuild + StyleX + islands + `datastar.js` app build helper (`createAppBuild`)
