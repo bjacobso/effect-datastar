@@ -25,11 +25,14 @@
  * (`Repo` checks the ids against the tenant first, as it does for any
  * reference, so the user sees "That tag no longer exists".)
  *
- * SQLite-specific: the read uses `json_group_array`.
+ * SQL dialect-aware: delegates JSON array aggregation (`json_group_array` on
+ * SQLite, `COALESCE(json_agg(...), '[]'::json)` on Postgres) and constraint
+ * error classification to `SqlDialect` (defaulting to `SqliteDialect`).
  */
 import { Effect, Schema } from "effect"
 import { SqlError } from "effect/sql"
 import type { Statement } from "effect/sql"
+import { SqliteDialect, type SqlDialectService } from "./Dialect.ts"
 import type * as Field from "./Field.ts"
 
 export type Through = Field.Through
@@ -48,24 +51,36 @@ const compare = (a: unknown, b: unknown) => (a === b ? 0 : (a as number) < (b as
 export const canonical = <A>(ids: ReadonlyArray<A>): ReadonlyArray<A> => [...new Set(ids)].sort(compare)
 
 /**
- * `(SELECT json_group_array(tagId) ...) AS tags`: the field's ids for each row
- * of `table`, as a JSON array text, in ascending order. `parse` turns it back
- * into an array before the row is decoded.
+ * Correlated JSON array subquery returning the field's ids for each row of
+ * `table` in ascending order (`json_group_array` on SQLite, `json_agg` with
+ * `COALESCE` on Postgres). `parse` normalizes the column back into a JS array
+ * before the row is decoded.
  */
-export const select = (sql: Sql, link: Link, table: string, idColumn: string): Statement.Fragment => {
-  const { from, to } = link.through
-  return sql`(SELECT json_group_array(${sql(to)}) FROM (
-    SELECT ${sql(to)} FROM ${sql(link.through.table)}
-    WHERE ${sql(from)} = ${sql(table)}.${sql(idColumn)} ORDER BY ${sql(to)}
-  )) AS ${sql(link.key)}`
-}
+export const select = (
+  sql: Sql,
+  link: Link,
+  table: string,
+  idColumn: string,
+  dialect: SqlDialectService = SqliteDialect
+): Statement.Fragment =>
+  dialect.jsonArraySubquery(sql, {
+    joinTable: link.through.table,
+    fromColumn: link.through.from,
+    toColumn: link.through.to,
+    parentTable: table,
+    parentIdColumn: idColumn,
+    alias: link.key
+  })
 
-/** Replaces each link's JSON text (from `select`) with the array, in place. */
-export const parse = (links: ReadonlyArray<Link>, rows: ReadonlyArray<Record<string, unknown>>) => {
+/** Replaces each link's serialized JSON array (or already-parsed Postgres array) with a JS array, in place. */
+export const parse = (
+  links: ReadonlyArray<Link>,
+  rows: ReadonlyArray<Record<string, unknown>>,
+  dialect: SqlDialectService = SqliteDialect
+) => {
   for (const row of rows) {
     for (const link of links) {
-      const raw = row[link.key]
-      row[link.key] = typeof raw === "string" ? JSON.parse(raw) : []
+      row[link.key] = [...dialect.parseJsonArray(row[link.key])]
     }
   }
   return rows
@@ -81,8 +96,8 @@ export const has = (sql: Sql, link: Link, idColumn: string, value: unknown): Sta
  * A foreign key failure on the join table names the field, so the resource's
  * `invalidReference` message for it is picked (SQLite's message names no column).
  */
-const nameField = (link: Link) => (e: SqlError.SqlError) =>
-  e.reason._tag === "ConstraintError"
+const nameField = (link: Link, dialect: SqlDialectService) => (e: SqlError.SqlError) =>
+  dialect.isInvalidReference(e)
     ? Effect.fail(
       new SqlError.SqlError({
         reason: new SqlError.ConstraintError({
@@ -107,7 +122,8 @@ export const write = (
   ids: ReadonlyArray<unknown>,
   known: ReadonlyArray<unknown> | undefined,
   /** More columns for each new join row (the tenant, see `Through.tenant`). */
-  extra: Readonly<Record<string, unknown>> = {}
+  extra: Readonly<Record<string, unknown>> = {},
+  dialect: SqlDialectService = SqliteDialect
 ) =>
   Effect.gen(function*() {
     const { from, to, table } = link.through
@@ -126,6 +142,6 @@ export const write = (
     if (added.length > 0) {
       yield* sql`INSERT INTO ${sql(table)} ${
         sql.insert(added.map((v) => ({ ...extra, [from]: id, [to]: v })) as unknown as readonly [Record<string, unknown>, ...Array<Record<string, unknown>>])
-      }`.pipe(Effect.catchTag("SqlError", nameField(link)))
+      }`.pipe(Effect.catchTag("SqlError", nameField(link, dialect)))
     }
   })
