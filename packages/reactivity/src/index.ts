@@ -1,4 +1,5 @@
 export * as Broadcast from "./Broadcast.ts"
 export * as DistributedReactivity from "./DistributedReactivity.ts"
 export * as Payload from "./Payload.ts"
+export * as PostgresBroadcast from "./PostgresBroadcast.ts"
 export * as SqliteBroadcast from "./SqliteBroadcast.ts"
