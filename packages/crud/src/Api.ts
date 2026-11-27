@@ -41,9 +41,12 @@ import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup, HttpApiMiddlewa
 import type { HttpApiEndpoint as Endpoint } from "effect/http-api"
 import type { HttpApiError } from "effect/http-api"
 import type { SqlError } from "effect/sql"
+import * as Policy from "./Policy.ts"
 import type * as Query from "./Query.ts"
 import type * as Repo from "./Repo.ts"
 import type { Messages, ModelLike, RepoOf } from "./Resource.ts"
+
+export { Forbidden } from "./Policy.ts"
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -113,7 +116,8 @@ export interface Source<
   Id extends keyof M["fields"] & keyof M["Type"] & keyof M["update"]["Type"] & string,
   Sortable extends string,
   FK extends string,
-  R = never
+  R = never,
+  A = never
 > {
   readonly name: Name
   readonly noun: string
@@ -124,6 +128,8 @@ export interface Source<
   readonly messages: Messages
   /** For a tenant-scoped resource: the column the server sets, and the current tenant's id. */
   readonly tenant: { readonly column: string; readonly id: Effect.Effect<unknown, never, R> } | undefined
+  /** Declarative authorization policy for this resource (defaults to allow-all). */
+  readonly authorize?: Policy.Policy<A> | undefined
 }
 
 /**
@@ -142,9 +148,12 @@ export const make = <
   const Id extends keyof M["fields"] & keyof M["Type"] & keyof M["update"]["Type"] & string,
   Sortable extends string,
   FK extends string,
-  R = never
->(resource: Source<Name, M, Id, Sortable, FK, R>) => {
-  const { idColumn, messages, model, name, noun, query, tenant } = resource
+  R = never,
+  A = never
+>(resource: Source<Name, M, Id, Sortable, FK, R, A>) => {
+  const { authorize, idColumn, messages, model, name, noun, query, tenant } = resource
+  const check = (action: Policy.CrudAction) =>
+    Policy.require(authorize, action, `Not allowed to ${action} ${noun}s`)
   type Row = M["Type"]
   type IdType = M["fields"][Id]["Type"]
 
@@ -169,20 +178,20 @@ export const make = <
 
   const group = HttpApiGroup.make(name)
     .add(
-      HttpApiEndpoint.get("list", "/", { query: query.params, success: PageJson }),
-      HttpApiEndpoint.get("get", "/:id", { params: IdParam, success: RowJson, error: NotFound }),
+      HttpApiEndpoint.get("list", "/", { query: query.params, success: PageJson, error: Policy.Forbidden }),
+      HttpApiEndpoint.get("get", "/:id", { params: IdParam, success: RowJson, error: [NotFound, Policy.Forbidden] }),
       HttpApiEndpoint.post("create", "/", {
         payload: CreateJson,
         success: RowJson.pipe(HttpApiSchema.status(201)),
-        error: Conflict
+        error: [Conflict, Policy.Forbidden]
       }),
       HttpApiEndpoint.put("update", "/:id", {
         params: IdParam,
         payload: UpdateJson,
         success: RowJson,
-        error: [NotFound, Conflict]
+        error: [NotFound, Conflict, Policy.Forbidden]
       }),
-      HttpApiEndpoint.delete("delete", "/:id", { params: IdParam, error: [NotFound, Conflict] })
+      HttpApiEndpoint.delete("delete", "/:id", { params: IdParam, error: [NotFound, Conflict, Policy.Forbidden] })
     )
     .middleware(Validation)
     .prefix(`/${name}`)
@@ -242,23 +251,23 @@ export const make = <
   interface Handlers {
     readonly handle: (
       endpoint: "list" | "get" | "create" | "update" | "delete",
-      handler: (request: Request) => Effect.Effect<unknown, NotFound | Conflict, R>
+      handler: (request: Request) => Effect.Effect<unknown, NotFound | Conflict | Policy.Forbidden, R | A>
     ) => Handlers
   }
   const buildGroup = HttpApiBuilder.group as unknown as <ApiId extends string, Groups extends HttpApiGroup.Constraint>(
     api: HttpApi.HttpApi<ApiId, Groups>,
     group: Name,
     build: (handlers: Handlers) => Effect.Effect<Handlers, never, RepoOf<Name>>
-  ) => Layer.Layer<HttpApiGroup.Service<ApiId, Name>, never, Requirements<Groups, Name, R>>
+  ) => Layer.Layer<HttpApiGroup.Service<ApiId, Name>, never, Requirements<Groups, Name, R | A>>
   const construct = <T>(variant: unknown, value: unknown): T => (variant as { make: (v: unknown) => T }).make(value)
 
   /**
    * The handlers, for an `HttpApi` that includes `group` (it may be prefixed).
-   * Requires the resource's `Repo`, and its tenant service unless the API's middleware provides it.
+   * Requires the resource's `Repo`, and its tenant/policy services unless the API's middleware provides them.
    */
   const layer = <ApiId extends string, Groups extends HttpApiGroup.Constraint>(
     api: HttpApi.HttpApi<ApiId, Groups>
-  ): Layer.Layer<HttpApiGroup.Service<ApiId, Name>, never, Exclude<Requirements<Groups, Name, R>, Validation>> =>
+  ): Layer.Layer<HttpApiGroup.Service<ApiId, Name>, never, Exclude<Requirements<Groups, Name, R | A>, Validation>> =>
     buildGroup(api, name, (handlers) =>
       Effect.map(Effect.service(resource.Repo), (repo) => {
         const find = (id: IdType): Effect.Effect<Row, NotFound, R> =>
@@ -267,16 +276,18 @@ export const make = <
             Effect.catchTags({ SchemaError: Effect.die, SqlError: Effect.die })
           )
         return handlers
-          .handle("list", (r) => repo.list(query.fromParams(r.query)).pipe(Effect.orDie))
-          .handle("get", (r) => find(r.params.id))
+          .handle("list", (r) => Effect.flatMap(check("read"), () => repo.list(query.fromParams(r.query)).pipe(Effect.orDie)))
+          .handle("get", (r) => Effect.flatMap(check("read"), () => find(r.params.id)))
           .handle("create", (r) =>
             Effect.gen(function*() {
+              yield* check("create")
               return yield* repo.insert(construct<M["insert"]["Type"]>(model.insert, yield* withTenant(r.payload)))
             }).pipe(
               Effect.catchTags({ SqlError: saveError, SchemaError: Effect.die, InvalidReference: invalidReference })
             ))
           .handle("update", (r) =>
             Effect.gen(function*() {
+              yield* check("update")
               yield* find(r.params.id)
               return yield* repo.update(
                 construct<M["update"]["Type"]>(model.update, { ...(yield* withTenant(r.payload)), [idColumn]: r.params.id })
@@ -289,6 +300,7 @@ export const make = <
             })))
           .handle("delete", (r) =>
             Effect.gen(function*() {
+              yield* check("delete")
               yield* find(r.params.id)
               yield* repo.delete(r.params.id)
             }).pipe(Effect.catchTags({

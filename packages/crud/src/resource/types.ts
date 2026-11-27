@@ -10,6 +10,7 @@ import type { SqlClient } from "effect/sql"
 import type { ReactElement, ReactNode } from "react"
 import type * as Components from "../components.tsx"
 import type * as Lookup from "../Lookup.ts"
+import type * as Policy from "../Policy.ts"
 import type * as Query from "../Query.ts"
 import type * as Scope from "../Scope.ts"
 
@@ -90,7 +91,8 @@ export interface Config<
   Filters extends Record<string, Query.Operator>,
   TC extends Fields<M> = never,
   T = never,
-  L = never
+  L = never,
+  A = never
 > {
   /** Table name, URL prefix, signal namespace and DOM id prefix. */
   readonly name: Name
@@ -126,6 +128,11 @@ export interface Config<
    * `id` on every read and write, and hidden like an embed's lock (see `Scope.ts`).
    */
   readonly tenant?: Scope.Tenant<TC, T, M["Type"][TC]> | undefined
+  /**
+   * Declarative authorization policy for this resource (see `Policy.ts`).
+   * Defaults to allow-all when omitted, requiring no extra services.
+   */
+  readonly authorize?: Policy.Policy<A> | undefined
 }
 
 /** A resource's constraint-violation messages, resolved (see `Config["messages"]`). */

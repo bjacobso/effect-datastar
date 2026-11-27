@@ -22,7 +22,8 @@ import { HttpRouter } from "effect/http"
 import { Reactivity } from "effect/reactivity"
 import { Fragment } from "react"
 import * as Components from "../components.tsx"
-import { unexpected } from "../Feedback.tsx"
+import { toast, unexpected } from "../Feedback.tsx"
+import * as Policy from "../Policy.ts"
 import { FROM, type Wired } from "./context.ts"
 import type { TableEndpoints } from "./endpoints.ts"
 import { cell, html, styles } from "./render.tsx"
@@ -37,12 +38,13 @@ export const make = <
   FK extends string,
   T,
   L,
+  A,
   QK extends string
 >(
-  w: Wired<Name, M, Id, Sortable, FK, T, L>,
-  endpoints: TableEndpoints<Name, M, Id, Sortable, FK, T, L>,
+  w: Wired<Name, M, Id, Sortable, FK, T, L, A>,
+  endpoints: TableEndpoints<Name, M, Id, Sortable, FK, NoInfer<T>, NoInfer<L>, NoInfer<A>>,
   /** The list page's table: its dialog and relation selects. */
-  list: Views<Name, M, Id, Sortable, FK, T, L, QK>,
+  list: Views<Name, M, Id, Sortable, FK, NoInfer<T>, NoInfer<L>, NoInfer<A>, QK>,
   sections: ReadonlyArray<SectionInput<M["Type"], M["fields"][Id]["Type"]>>
 ) => {
   type Row = M["Type"]
@@ -51,7 +53,11 @@ export const make = <
   const { edit, remove } = endpoints
 
   /** The row's fields with Edit and Delete, or a notice once it has been deleted. Re-rendered live. */
-  const RecordView = (props: { readonly row: Row | undefined; readonly lookups: Components.Lookups }) => {
+  const RecordView = (props: {
+    readonly row: Row | undefined
+    readonly lookups: Components.Lookups
+    readonly capabilities?: Policy.Capabilities | undefined
+  }) => {
     const row = props.row
     if (row === undefined) {
       return (
@@ -61,24 +67,29 @@ export const make = <
         </section>
       )
     }
+    const caps = props.capabilities ?? Policy.allCapabilities
     const id = String(row[idColumn])
     return (
       <section id={`${name}-record`} {...stylex.props(styles.record)}>
         <header {...stylex.props(styles.bar, styles.flush)}>
           <h1 {...stylex.props(styles.h1)}>{w.label(row)}</h1>
-          <span {...stylex.props(styles.actions)}>
-            <Button icon="edit" {...ds.on("click", edit.call({ id }))}>Edit</Button>
-            <Button
-              variant="danger"
-              icon="trash"
-              {...ds.on(
-                "click",
-                Action.confirm(`Delete ${w.label(row)}?`, remove.call({ id }, { search: { [FROM]: "detail" } })).toExpr()
+          {(caps.update || caps.delete) && (
+            <span {...stylex.props(styles.actions)}>
+              {caps.update && <Button icon="edit" {...ds.on("click", edit.call({ id }))}>Edit</Button>}
+              {caps.delete && (
+                <Button
+                  variant="danger"
+                  icon="trash"
+                  {...ds.on(
+                    "click",
+                    Action.confirm(`Delete ${w.label(row)}?`, remove.call({ id }, { search: { [FROM]: "detail" } })).toExpr()
+                  )}
+                >
+                  Delete
+                </Button>
               )}
-            >
-              Delete
-            </Button>
-          </span>
+            </span>
+          )}
         </header>
         <Card>
           <dl {...stylex.props(styles.dl)}>
@@ -123,6 +134,8 @@ export const make = <
     "GET",
     "/:id/view",
     Stream.unwrap(Effect.gen(function*() {
+      const caps = yield* w.capabilities
+      if (!caps.read) return Stream.fromEffect(Effect.succeed([toast(`Not allowed to read ${w.noun}s`, "error")] as ReadonlyArray<Datastar.DatastarEvent>))
       const reactivity = yield* Reactivity.Reactivity
       const repo = yield* w.Repo
       const services = yield* w.relationServices
@@ -151,7 +164,7 @@ export const make = <
         const deltas = reactivity.stream([...new Set(keys)], read).pipe(
           Stream.map(([row, loaded]): ReadonlyArray<Datastar.DatastarEvent> => {
             lookups = loaded
-            const html = render(<RecordView row={row} lookups={loaded} />)
+            const html = render(<RecordView row={row} lookups={loaded} capabilities={caps} />)
             const events = html === lastRecord ? [] : [Datastar.patchElements(html)]
             lastRecord = html
             const key = JSON.stringify(loaded)
@@ -171,9 +184,26 @@ export const make = <
             : [Datastar.patchElements(lastRecord), ...list.fieldSelects(lookups)]
         return { deltas, snapshot } satisfies Shared.Source
       }).pipe(Effect.provideContext(tenantOnly as Context.Context<T>))
-      return Shared.subscribe(records, JSON.stringify([tenantKey, w.encodeId(id)]), source)
+      return Shared.subscribe(records, JSON.stringify([tenantKey, Policy.capabilitiesKey(caps), w.encodeId(id)]), source)
     })).pipe(Stream.catch((error) => Stream.fromEffect(unexpected(error)))),
     { prefix, include: [] }
+  )
+
+  const forbidden = html(
+    w.layout({
+      title: "Forbidden",
+      active: prefix,
+      children: (
+        <main>
+          <Card>
+            <EmptyState icon="alert" title="Forbidden">
+              {`You do not have permission to view ${w.title.toLowerCase()}.`}
+            </EmptyState>
+          </Card>
+        </main>
+      )
+    }),
+    403
   )
 
   const notFound = html(
@@ -203,6 +233,8 @@ export const make = <
       "GET",
       `${prefix}/:id`,
       Effect.gen(function*() {
+        const caps = yield* w.capabilities
+        if (!caps.read) return yield* forbidden
         const id = yield* Effect.option(w.readId)
         if (id._tag === "None") return yield* notFound
         const row = yield* findRecord(id.value)
@@ -223,10 +255,10 @@ export const make = <
                 </a>
               </p>
               <div id={`${name}-record-live`} $init={record.call({ id: String(id.value) })}>
-                <RecordView row={row} lookups={lookups} />
+                <RecordView row={row} lookups={lookups} capabilities={caps} />
               </div>
               {extra.map((section, i) => <Fragment key={i}>{section}</Fragment>)}
-              <list.Editor lookups={lookups} />
+              {caps.update && <list.Editor lookups={lookups} />}
               <Components.Toast />
             </main>
           )

@@ -145,7 +145,7 @@ describe("OpenAPI", () => {
     expect(list.parameters.map((p: { name: string }) => p.name)).toEqual(
       expect.arrayContaining(["page", "pageSize", "sort", "dir", "name", "email", "role", "teamId", "active", "tags", "createdAtFrom", "createdAtTo"])
     )
-    expect(Object.keys(body.paths["/api/users"].post.responses).sort()).toEqual(["201", "400", "401", "409"])
+    expect(Object.keys(body.paths["/api/users"].post.responses).sort()).toEqual(["201", "400", "401", "403", "409"])
   })
 
   it("serves the docs page", async () => {

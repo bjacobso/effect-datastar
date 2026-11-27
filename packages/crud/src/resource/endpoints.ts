@@ -31,12 +31,12 @@ export interface Tables<IdType, R> {
   readonly embeds: Map<string, { readonly table: Handlers<IdType, R>; readonly parse: (raw: string) => string | undefined }>
 }
 
-export const make = <Name extends string, M extends ModelLike, Id extends IdKey<M>, Sortable extends Fields<M>, FK extends string, T, L>(
-  w: Wired<Name, M, Id, Sortable, FK, T, L>,
-  tables: Tables<M["fields"][Id]["Type"], Requires<Name, T>>
+export const make = <Name extends string, M extends ModelLike, Id extends IdKey<M>, Sortable extends Fields<M>, FK extends string, T, L, A>(
+  w: Wired<Name, M, Id, Sortable, FK, T, L, A>,
+  tables: Tables<M["fields"][Id]["Type"], Requires<Name, T, A>>
 ) => {
   type IdType = M["fields"][Id]["Type"]
-  type Table = Handlers<IdType, Requires<Name, T>>
+  type Table = Handlers<IdType, Requires<Name, T, A>>
   const { name, prefix, query } = w
 
   /** The table a request is for: the list's, or an embed's with its validated lock value. */
@@ -52,7 +52,7 @@ export const make = <Name extends string, M extends ModelLike, Id extends IdKey<
   })
 
   /** Runs `f` with the path's id and the request's table; a bad id or scope is a toast. */
-  const onRow = (f: (id: IdType, table: Table, lock: Lock) => Effect.Effect<Datastar.Events, never, Requires<Name, T>>) =>
+  const onRow = (f: (id: IdType, table: Table, lock: Lock) => Effect.Effect<Datastar.Events, never, Requires<Name, T, A>>) =>
     Effect.gen(function*() {
       const id = yield* w.readId
       const t = yield* target
@@ -60,7 +60,7 @@ export const make = <Name extends string, M extends ModelLike, Id extends IdKey<
     }).pipe(Effect.catchTags({ SchemaError: unexpected, ScopeError: unexpected }))
 
   /** A table-level action (`?embed=&scope=` picks the table and its lock). */
-  const onTable = (f: (table: Table, lock: Lock) => Effect.Effect<Datastar.Events, never, Requires<Name, T>>) =>
+  const onTable = (f: (table: Table, lock: Lock) => Effect.Effect<Datastar.Events, never, Requires<Name, T, A>>) =>
     Effect.flatMap(target, (t) => f(t.table, t.lock)).pipe(Effect.catchTag("ScopeError", unexpected))
 
   return {
@@ -116,5 +116,6 @@ export type TableEndpoints<
   Sortable extends Fields<M>,
   FK extends string,
   T,
-  L
-> = ReturnType<typeof make<Name, M, Id, Sortable, FK, T, L>>
+  L,
+  A = never
+> = ReturnType<typeof make<Name, M, Id, Sortable, FK, T, L, A>>

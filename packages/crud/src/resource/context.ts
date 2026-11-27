@@ -16,6 +16,7 @@ import type * as Field from "../Field.ts"
 import { toast } from "../Feedback.tsx"
 import * as Form from "../Form.ts"
 import * as Lookup from "../Lookup.ts"
+import * as Policy from "../Policy.ts"
 import * as Query from "../Query.ts"
 import * as Repo from "../Repo.ts"
 import type * as Scope from "../Scope.ts"
@@ -43,7 +44,7 @@ export const searchParams = Effect.map(
 )
 
 /** A resource's definition, resolved: what every part of it shares. */
-export interface Ctx<Name extends string, M extends ModelLike, Id extends IdKey<M>, Sortable extends Fields<M>, FK extends string, T, L> {
+export interface Ctx<Name extends string, M extends ModelLike, Id extends IdKey<M>, Sortable extends Fields<M>, FK extends string, T, L, A = never> {
   readonly name: Name
   readonly prefix: `/${Name}`
   readonly title: string
@@ -52,6 +53,9 @@ export interface Ctx<Name extends string, M extends ModelLike, Id extends IdKey<
   readonly idColumn: Id
   readonly display: string
   readonly layout: Layout<L>
+  readonly authorize: Policy.Policy<A> | undefined
+  readonly capabilities: Effect.Effect<Policy.Capabilities, never, A>
+  readonly require: (action: Policy.CrudAction) => Effect.Effect<void, Policy.Forbidden, A>
   readonly columns: Readonly<Record<string, ((row: M["Type"], lookups: Components.Lookups) => ReactNode) | undefined>>
   readonly config: Pick<Config<Name, M, Id, Sortable, Record<string, Query.Operator>>, "messages" | "bulk">
   readonly query: Query.QueryDef<Sortable, FK>
@@ -91,12 +95,14 @@ export const resolve = <
   Filters extends { readonly [K in Fields<M>]?: Query.Operator },
   TC extends Fields<M>,
   T,
-  L
->(config: Config<Name, M, Id, Sortable, Filters & Record<string, Query.Operator>, TC, T, L>): Ctx<Name, M, Id, Sortable, Query.Keys<Filters>, T, L> => {
+  L,
+  A = never
+>(config: Config<Name, M, Id, Sortable, Filters & Record<string, Query.Operator>, TC, T, L, A>): Ctx<Name, M, Id, Sortable, Query.Keys<Filters>, T, L, A> => {
   const { name, model, idColumn } = config
   type IdType = M["fields"][Id]["Type"]
   type Row = M["Type"]
 
+  const authorize = config.authorize
   const tenant = config.tenant
   const tenantColumn: string | undefined = tenant?.column
   const encodeTenant = tenant && Schema.encodeUnknownSync(model.fields[tenant.column] as Schema.Codec<unknown, string | number>)
@@ -132,10 +138,13 @@ export const resolve = <
     idColumn,
     display: config.display,
     layout: config.layout,
-    columns: (config.columns ?? {}) as Ctx<Name, M, Id, Sortable, Query.Keys<Filters>, T, L>["columns"],
+    authorize,
+    capabilities: Policy.capabilities(authorize),
+    require: (action) => Policy.require(authorize, action, `Not allowed to ${action} ${config.noun}s`),
+    columns: (config.columns ?? {}) as Ctx<Name, M, Id, Sortable, Query.Keys<Filters>, T, L, A>["columns"],
     config,
     query,
-    tenant: tenant as Ctx<Name, M, Id, Sortable, Query.Keys<Filters>, T, L>["tenant"],
+    tenant: tenant as Ctx<Name, M, Id, Sortable, Query.Keys<Filters>, T, L, A>["tenant"],
     scope,
     reference: { table: name, idColumn, tenantColumn },
     formFields,
@@ -171,8 +180,8 @@ export const resolve = <
 }
 
 /** A resolved definition with its relations attached (in `app`). */
-export interface Wired<Name extends string, M extends ModelLike, Id extends IdKey<M>, Sortable extends Fields<M>, FK extends string, T, L>
-  extends Ctx<Name, M, Id, Sortable, FK, T, L>
+export interface Wired<Name extends string, M extends ModelLike, Id extends IdKey<M>, Sortable extends Fields<M>, FK extends string, T, L, A = never>
+  extends Ctx<Name, M, Id, Sortable, FK, T, L, A>
 {
   /** Field -> the lookup of the resource it references (foreign keys and many-to-many fields). */
   readonly relations: ReadonlyArray<readonly [string, LookupTag]>
@@ -192,10 +201,10 @@ export interface Wired<Name extends string, M extends ModelLike, Id extends IdKe
   readonly goneToast: () => Effect.Effect<Datastar.DatastarEvent>
 }
 
-export const wire = <Name extends string, M extends ModelLike, Id extends IdKey<M>, Sortable extends Fields<M>, FK extends string, T, L>(
-  ctx: Ctx<Name, M, Id, Sortable, FK, T, L>,
+export const wire = <Name extends string, M extends ModelLike, Id extends IdKey<M>, Sortable extends Fields<M>, FK extends string, T, L, A = never>(
+  ctx: Ctx<Name, M, Id, Sortable, FK, T, L, A>,
   relations: ReadonlyArray<readonly [string, LookupTag]>
-): Wired<Name, M, Id, Sortable, FK, T, L> => {
+): Wired<Name, M, Id, Sortable, FK, T, L, A> => {
   const configured = ctx.config.messages
   const messages: Messages = {
     unique: configured?.unique ?? {},

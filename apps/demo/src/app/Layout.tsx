@@ -2,12 +2,13 @@
 import * as stylex from "@stylexjs/stylex"
 import { Effect } from "effect"
 import type { ReactNode } from "react"
-import { CurrentOrg, CurrentUser } from "../auth/Auth.ts"
+import { type AccountRole, CurrentOrg, CurrentUser } from "../auth/Auth.ts"
 import * as ds from "@effect-datastar/datastar/Attrs.ts"
 import { Action } from "@effect-datastar/datastar/Expr.ts"
 import * as Island from "@effect-datastar/ui/islands/Island.tsx"
 import { Theme } from "@effect-datastar/ui/islands/islands.tsx"
 import { Button } from "@effect-datastar/ui/Button.tsx"
+import { Badge, type Tone } from "@effect-datastar/ui/display.tsx"
 import { Logo } from "@effect-datastar/ui/icons.tsx"
 import { themeScript } from "@effect-datastar/ui/theme/themes.ts"
 import { color, font, radius, size, space } from "@effect-datastar/ui/theme/tokens.stylex.ts"
@@ -15,11 +16,22 @@ import { color, font, radius, size, space } from "@effect-datastar/ui/theme/toke
 const links = [["/users", "Users"], ["/teams", "Teams"], ["/tags", "Tags"]] as const
 const signOut = Action.raw("@post('/logout')")
 
+const roleTone: Readonly<Record<AccountRole, Tone>> = {
+  admin: "accent",
+  member: "success",
+  viewer: "neutral"
+}
+
 interface ShellProps {
   readonly title: string
   readonly active: string
   /** The signed-in account and its organization, shown in the header with a sign-out button. */
-  readonly account?: { readonly name: string; readonly email: string; readonly org: string } | undefined
+  readonly account?: {
+    readonly name: string
+    readonly email: string
+    readonly org: string
+    readonly role: AccountRole
+  } | undefined
   readonly children: ReactNode
 }
 
@@ -31,7 +43,7 @@ export const Layout = (props: { readonly title: string; readonly active: string;
   Effect.gen(function*() {
     const user = yield* CurrentUser
     const org = yield* CurrentOrg
-    return <Shell {...props} account={{ name: user.name, email: user.email, org: org.name }} />
+    return <Shell {...props} account={{ name: user.name, email: user.email, org: org.name, role: user.role }} />
   })
 
 /** The HTML document, header and page container (the sign-in page uses it without an account). */
@@ -74,6 +86,9 @@ export const Shell = (props: ShellProps) => (
               <span {...stylex.props(styles.who)} title={props.account.email}>
                 <span id="account-name" {...stylex.props(styles.name)}>{props.account.name}</span>
                 <span id="account-org" {...stylex.props(styles.org)}>{props.account.org}</span>
+              </span>
+              <span id="account-role">
+                <Badge tone={roleTone[props.account.role]}>{props.account.role}</Badge>
               </span>
               <Button size="sm" icon="logout" {...ds.on("click", signOut.toExpr())}>Sign out</Button>
             </div>

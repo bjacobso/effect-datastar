@@ -158,14 +158,23 @@ const migrations = Migrator.fromRecord({
     }
     yield* sql`CREATE INDEX teams_orgId_name ON teams(orgId, name)`
     yield* sql`CREATE INDEX tags_orgId_name ON tags(orgId, name)`
+  }),
+  /**
+   * Account roles for RBAC (`admin`, `member`, `viewer`). Existing accounts
+   * default to `admin` so existing databases upgrade smoothly.
+   */
+  "0007_account_roles": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE accounts ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'`
   })
 })
 
-/** Demo sign-ins (seeded): two in Acme, one in Globex. */
+/** Demo sign-ins (seeded): three in Acme (admin, member, viewer), one in Globex (admin). */
 export const demoAccounts = [
-  { email: "ada@acme.test", name: "Ada Lovelace", org: "Acme", password: "demo-password" },
-  { email: "grace@acme.test", name: "Grace Hopper", org: "Acme", password: "demo-password" },
-  { email: "linus@globex.test", name: "Linus Torvalds", org: "Globex", password: "demo-password" }
+  { email: "ada@acme.test", name: "Ada Lovelace", org: "Acme", role: "admin", password: "demo-password" },
+  { email: "grace@acme.test", name: "Grace Hopper", org: "Acme", role: "member", password: "demo-password" },
+  { email: "alan@acme.test", name: "Alan Turing", org: "Acme", role: "viewer", password: "demo-password" },
+  { email: "linus@globex.test", name: "Linus Torvalds", org: "Globex", role: "admin", password: "demo-password" }
 ] as const
 
 const seed = Effect.gen(function*() {
@@ -229,6 +238,7 @@ const seed = Effect.gen(function*() {
         email: a.email,
         name: a.name,
         orgId: orgId(a.org),
+        role: a.role,
         passwordHash,
         createdAt: new Date(Date.UTC(2025, 5, 1)).toISOString()
       })), { concurrency: "unbounded" })

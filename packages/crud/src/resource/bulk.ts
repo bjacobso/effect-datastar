@@ -29,10 +29,11 @@ export const make = <
   FK extends string,
   T,
   L,
+  A,
   QK extends string
 >(
-  w: Wired<Name, M, Id, Sortable, FK, T, L>,
-  t: Model<Name, M, Id, Sortable, FK, T, L, QK>
+  w: Wired<Name, M, Id, Sortable, FK, T, L, A>,
+  t: Model<Name, M, Id, Sortable, FK, T, L, A, QK>
 ) => {
   type Row = M["Type"]
   type IdType = M["fields"][Id]["Type"]
@@ -54,18 +55,25 @@ export const make = <
   /** Delete the selection in one transaction. Rows the database keeps (references) stay selected. */
   const remove = (lock: Lock) =>
     Effect.gen(function*() {
+      yield* w.require("bulk")
       const repo = yield* w.Repo
       const { selection } = yield* readSelection
       const result = yield* repo.deleteMany(selection, { only: only(lock) })
       const outcome = { done: result.done.length, missing: result.missing.length, restricted: result.restricted.length }
       return done(Bulk.summary("deleted", outcome, w.messages.bulkDeleteRestricted), result.restricted)
     }).pipe(
-      Effect.catchTags({ SignalsError: badSelection, SchemaError: unexpected, SqlError: unexpected })
+      Effect.catchTags({
+        Forbidden: (e) => Effect.succeed(toast(e.message, "error")),
+        SignalsError: badSelection,
+        SchemaError: unexpected,
+        SqlError: unexpected
+      })
     )
 
   /** Set one of the `bulk.set` fields on the selection, in one transaction. */
   const update = (lock: Lock) =>
     Effect.gen(function*() {
+      yield* w.require("bulk")
       const repo = yield* w.Repo
       const { selection, bulk } = yield* readBulkUpdate
       const field = t.setFields.find((f) => f.key === bulk.field)
@@ -81,6 +89,7 @@ export const make = <
       return done(Bulk.summary("updated", { done: result.done.length, missing: result.missing.length, restricted: 0 }, () => ""), [])
     }).pipe(
       Effect.catchTags({
+        Forbidden: (e) => Effect.succeed(toast(e.message, "error")),
         SignalsError: badSelection,
         BulkValueError: (e) => Effect.succeed(toast(`Invalid ${e.label.toLowerCase()}`, "error")),
         // A reference to a row of another tenant (or a deleted one): nothing was changed.
