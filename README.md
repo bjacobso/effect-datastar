@@ -30,7 +30,7 @@ A resource is defined in two steps. First a **definition**, a pure value per
 resource with no references to other resources:
 
 ```tsx
-// src/app/Users.tsx
+// apps/demo/src/app/Users.tsx
 export const Users = Resource.define({
   name: "users",
   title: "Users",
@@ -63,7 +63,7 @@ every definition is in scope, so users can point at teams and tags while a
 team's page embeds its users:
 
 ```ts
-// src/app/Resources.ts
+// apps/demo/src/app/Resources.ts
 export const Resources = Resource.app(
   Users.with({
     relations: { teamId: Teams },   // a foreign key column
@@ -99,7 +99,7 @@ Each route is registered once; embeds reuse them (below). Endpoint paths are
 typed as registered (`Resources.resources.users.endpoints.update.path` is
 `"/users/:id"`), and calls are typed from their params.
 
-The types catch wiring mistakes (`test/types.test.ts`):
+The types catch wiring mistakes (`apps/demo/test/types.test.ts`):
 
 - a relation or embed naming a resource that isn't in the app (the error names
   the missing resources), and routes served without a resource's layer;
@@ -113,7 +113,7 @@ The types catch wiring mistakes (`test/types.test.ts`):
 ## Fields
 
 Every widget, filter and SQL encoding follows from the model's schemas, not from
-per-field config (`src/crud/Field.ts`, `src/crud/Schemas.ts`):
+per-field config (`packages/crud/src/Field.ts`, `packages/crud/src/Schemas.ts`):
 
 | Schema                                   | Kind       | Form widget                                    | Table                  |
 | ---------------------------------------- | ---------- | ---------------------------------------------- | ---------------------- |
@@ -138,7 +138,7 @@ A `widget` annotation still overrides the derived one.
   through the URL and are validated like any filter.
 - **Switch, not a ui-sdk Switch island.** `data-bind` already maps a checkbox to
   a boolean signal, so a native `<input type="checkbox" role="switch">` styled as
-  the ui-sdk Switch (`styles.switch` in `src/ui/form.tsx`) needs no island, no
+  the ui-sdk Switch (`styles.switch` in `packages/ui/src/form.tsx`) needs no island, no
   chunk and no host round trip, and works before any island code has loaded.
 - **Textarea.** The ui-sdk Textarea renders a plain `<textarea>` on the server,
   which Datastar binds; it grows with its text through CSS `field-sizing: content`.
@@ -149,10 +149,10 @@ Storage is part of the model, the target is attached in the app, as for a
 foreign key:
 
 ```ts
-// src/app/User.ts: a field holding tag ids, stored in user_tags(userId, tagId, orgId)
+// apps/demo/src/app/User.ts: a field holding tag ids, stored in user_tags(userId, tagId, orgId)
 tags: ManyToMany.Ids(TagId, { table: "user_tags", from: "userId", to: "tagId", tenant: "orgId" })
 
-// src/app/Resources.ts: what the ids point at
+// apps/demo/src/app/Resources.ts: what the ids point at
 Users.with({ manyToMany: { tags: Tags } })
 ```
 
@@ -198,7 +198,7 @@ delete route; `Flash.redirect` does the navigation). The list page then shows
 the "Deleted" toast: a navigation would lose a toast sent with it, so
 `Flash.redirect` puts it in a short-lived cookie (`flash`, 10 s) right before
 `location.assign`, and the list page renders it and expires the cookie
-(`src/datastar/Flash.ts`). A cookie rather than a query param: there is nothing
+(`packages/datastar/src/Flash.ts`). A cookie rather than a query param: there is nothing
 to strip from the URL, a reload or a shared link doesn't toast again, and a
 link can't make the page say something. A rejected delete (a team that still
 has members) stays on the page with a toast.
@@ -231,7 +231,7 @@ the query string. Its query lives in its signals and resets on reload.
 
 ## Sign-in and organizations
 
-### Sessions (`src/auth/`)
+### Sessions (`apps/demo/src/auth/`)
 
 - `Auth.ts`: `CurrentUser` and `CurrentOrg` (`Context.Service`), and `Sessions`:
   `signIn` (scrypt via `node:crypto`, see `Password.ts`; an unknown email
@@ -246,13 +246,13 @@ the query string. Its query lives in its signals and resets on reload.
   `HttpApiMiddleware` (the cookie declared as an API key security scheme).
 
 ```ts
-// src/app/App.tsx: removing the Layer.provide makes this a type error,
+// apps/demo/src/app/App.tsx: removing the Layer.provide makes this a type error,
 // because the resources' routes require CurrentOrg (and the layout CurrentUser).
 const Protected = Layer.mergeAll(HttpRouter.add("GET", "/", redirect("/users")), Resources.routes)
   .pipe(Layer.provide(RequireSession.layer))
 export const Routes = Layer.mergeAll(Protected, LoginRoutes, ApiRoutes, HttpStaticServer.layer({ root: "public" }))
 
-// src/app/Api.ts
+// apps/demo/src/app/Api.ts
 class AppApi extends HttpApi.make("effect-datastar").add(UsersApi.group).add(TeamsApi.group).add(TagsApi.group)
   .middleware(Authentication).prefix("/api") {}
 ```
@@ -265,7 +265,7 @@ Without a valid session:
 | a Datastar request (`datastar-request: true`): a live view or an action | an SSE response with a redirect event to `/login` |
 | the JSON API                                    | `401 {"_tag":"Unauthorized","message":"Sign in first"}`   |
 
-`/login` is a form (the `src/ui` design system, Datastar signals) that posts to
+`/login` is a form (the `packages/ui` design system, Datastar signals) that posts to
 `POST /login`; on success the response sets the cookie and redirects with
 `Datastar.redirect` to `next` (a same-site path only). `POST /logout` deletes the
 session and expires the cookie. The header shows the account, its organization
@@ -298,7 +298,7 @@ export const Users = Resource.define({
 
 It is the embed lock generalized: the value comes from a service instead of
 `?scope=`, and it applies to every table, page, route and API call of the
-resource (`src/crud/Scope.ts`). The `Repo` and `Lookup` read `CurrentOrg` on
+resource (`packages/crud/src/Scope.ts`). The `Repo` and `Lookup` read `CurrentOrg` on
 each call, so it is in their types and in the routes' requirements:
 
 - `list`, `live`, the COUNT, `findById` and the lookup's options (the team and
@@ -331,7 +331,7 @@ same rules as single rows: only the current organization's rows are touched
 form (`InvalidReference`), the tenant column is never set, and the one
 invalidation is on the organization's key.
 
-**Migrations** (`src/app/Db.ts`) run in order on a fresh database and on one
+**Migrations** (`apps/demo/src/app/Db.ts`) run in order on a fresh database and on one
 from an earlier version: `0001_users`, `0002_teams`, `0003_orgs` (organizations;
 teams and users rebuilt with `orgId`, per-organization uniqueness and the
 `(teamId, orgId)` key; existing rows go to Acme), `0004_auth` (accounts and
@@ -345,7 +345,7 @@ and tags (each organization's own) to one that had none.
 The types check that `column` is a column whose values are the service's `id`s
 (`service: CurrentUser`, whose `id` is an account id, is an error), and that the
 routes can't be served without something providing `CurrentOrg`
-(`test/types.test.ts`).
+(`apps/demo/test/types.test.ts`).
 
 ### Live updates per organization
 
@@ -357,7 +357,7 @@ repo), so Globex's changes don't wake Acme's views at all. The same goes for
 related tables: an Acme users view depends on `teams[orgId=1]` and
 `tags[orgId=1]`, so a Globex tag rename, recolor or delete never reaches it,
 while an Acme one re-renders the views that show the tag. With
-`isolateKeys: false` they share `users`. `test/tenant-repo.test.ts` counts the
+`isolateKeys: false` they share `users`. `apps/demo/test/tenant-repo.test.ts` counts the
 statements six open Acme views run when Globex mutates its own rows:
 
 | Globex mutation                       | Shared keys | Per-organization keys |
@@ -368,11 +368,11 @@ statements six open Acme views run when Globex mutates its own rows:
 | toggle `active` (no query column)     |           0 |                     0 |
 | delete                                |          12 |                     0 |
 
-The security tests are `test/auth.test.ts` (redirects, 401s, the cookie, sign
-out), `test/tenant.test.ts` (every cross-organization path: lists, lookups,
+The security tests are `apps/demo/test/auth.test.ts` (redirects, 401s, the cookie, sign
+out), `apps/demo/test/tenant.test.ts` (every cross-organization path: lists, lookups,
 guessed ids, references, embeds, the API, live streams, bulk actions, tags),
-`test/tenant-repo.test.ts` (the repo's own checks, with plain foreign keys that
-can't catch a cross-organization team or tag) and `test/e2e/auth.test.ts` (sign
+`apps/demo/test/tenant-repo.test.ts` (the repo's own checks, with plain foreign keys that
+can't catch a cross-organization team or tag) and `apps/demo/test/e2e/auth.test.ts` (sign
 in as Acme, see nothing of Globex, sign out).
 
 ## Datastar DSL
@@ -411,27 +411,27 @@ The repository is an npm workspaces monorepo (`packages/*` and `apps/*`), with a
 ## Stack
 
 - **Server:** Effect 4 HTTP. Every page and patch is React rendered on the server with
-  `renderToStaticMarkup` (`src/datastar/Html.ts`). Static markup has no `<!-- -->` text
+  `renderToStaticMarkup` (`packages/ui/src/Html.ts`). Static markup has no `<!-- -->` text
   separators, so Datastar morphs plain HTML; nothing server-rendered is hydrated. Datastar
   attributes (`data-on:click`, `data-on-signal-patch-filter`, ...) are spread from the typed
-  `Attrs` helpers and reach the HTML unchanged (`test/render.test.tsx`).
+  `Attrs` helpers and reach the HTML unchanged (`apps/demo/test/render.test.tsx`).
 - **Styling:** StyleX with the `@dw/ui` tokens (`--dw-*` custom properties), so this app and
   document-workflow-service share one design. Dark mode follows `prefers-color-scheme`; the
   theme menu in the header forces Light or Dark (saved per browser, applied before first paint).
-  The only global CSS is `src/ui/theme/global.css` (reset, fonts, the `ui-sdk` layer).
+  The only global CSS is `packages/ui/src/theme/global.css` (reset, fonts, the `ui-sdk` layer).
 - **Browser:** Datastar owns state (signals, SSE, morphing). React runs only in islands.
 - **Build:** StyleX must be compiled, and the server renders nearly every component, so the
-  server is bundled too. `scripts/build.ts` runs esbuild with `@stylexjs/unplugin` twice in
+  server is bundled too. `apps/demo/scripts/build.ts` (via `scripts/build-app.ts`) runs esbuild with `@stylexjs/unplugin` twice in
   one process, server then browser, and writes:
-  - `dist/server.js`, the server, with dependencies left external.
-  - `public/build/islands.js`, the browser entry: a small loader that defines `<ds-island>`,
-    and `public/build/chunks/`, React and each island, split out (esbuild `splitting`, ESM)
+  - `apps/demo/dist/server.js`, the server, with dependencies left external.
+  - `apps/demo/public/build/islands.js`, the browser entry: a small loader that defines `<ds-island>`,
+    and `apps/demo/public/build/chunks/`, React and each island, split out (esbuild `splitting`, ESM)
     and loaded on demand. See [Islands](#islands).
-  - `public/build/app.css`, the global CSS and fonts plus every StyleX rule from both builds.
+  - `apps/demo/public/build/app.css`, the global CSS and fonts plus every StyleX rule from both builds.
     It is served as a static file.
 
   Vitest compiles StyleX with the unplugin's Vite plugin. The e2e global setup builds once and
-  the tests start `node dist/server.js`.
+  the tests start `node apps/demo/dist/server.js`.
 
 ## Islands
 
@@ -451,7 +451,7 @@ with the component rendered once as a placeholder:
 ```
 
 `islands.js` defines `<ds-island>`. A host, once connected, loads React and its island's
-code (`src/islands/loaders.ts`: one dynamic import per island) and mounts the component with
+code (`packages/ui/src/islands/loaders.ts`: one dynamic import per island) and mounts the component with
 `createRoot` (it doesn't hydrate, so server and client markup never have to match). The host
 element is where Datastar and React meet:
 
@@ -497,7 +497,7 @@ Islands in this app:
   patch to the team or tags select could land in that gap and fail with
   `PatchElementsNoTargetsFound`, an occasional e2e failure.)
   The dialog is modal only while open: ui-sdk would otherwise swallow clicks on the page
-  during its exit transition (see `src/ui/overlay.tsx`).
+  during its exit transition (see `packages/ui/src/overlay.tsx`).
 - `Theme`: the Light/Dark/System menu (ui-sdk Menu).
 
 A boolean is a native switch and long text a server-rendered textarea, not islands (see
@@ -527,7 +527,7 @@ Every table (the list page's and embeds) has a checkbox per row and a "select
 all on this page" checkbox in the header. While anything is selected, a bar
 above the rows shows "N selected", **Delete**, **Clear**, and a "Set <field>…"
 select per field in the resource's `bulk.set` (for users: role and team; the
-team options stay live like the form's). `src/crud/Bulk.tsx` has the UI and the
+team options stay live like the form's). `packages/crud/src/Bulk.tsx` has the UI and the
 toasts; `Resource` wires the endpoints.
 
 **The selection is a plain signal**, `users.selection` (the ids, in the id
@@ -586,7 +586,7 @@ with the organization's own key, so another organization's views are never woken
 is woken once and plans the whole batch, so row-level tracking still applies:
 setting the team of three visible rows is one re-fetch of those rows in a view
 that doesn't filter on team, and one re-query in a view that does.
-`test/queries.test.ts`, six open views:
+`apps/demo/test/queries.test.ts`, six open views:
 
 | Mutation                    | Statements | Three single mutations |
 | --------------------------- | ---------- | ---------------------- |
@@ -626,7 +626,7 @@ their repos' changes too:
 When the query signals change, the browser re-issues the request and Datastar
 cancels the previous stream.
 
-`test/queries.test.ts` counts SQL statements per mutation with six open Acme views.
+`apps/demo/test/queries.test.ts` counts SQL statements per mutation with six open Acme views.
 Before row-level changes, every mutation was 19 (each view re-ran its page query, COUNT
 and team lookup). Now, with users, teams and tags tenant-scoped and users carrying tags:
 
@@ -650,7 +650,7 @@ they change, so a rename doesn't check the user's team or tags.
 ### Across server processes
 
 `Reactivity` is process-local, so `Infra` provides a wrapped one
-(`src/reactivity/`). Several servers on the same SQLite file then update each
+(`packages/reactivity/`). Several servers on the same SQLite file then update each
 other's tabs, with no change to the resource code:
 
 ```ts
@@ -681,7 +681,7 @@ npm run build && (PORT=3000 npm run serve & PORT=3001 npm run serve)   # same ap
 A rename on server A is a single-row patch on server B, as it is on A: the
 `Change` travels with the broadcast.
 
-- `InvalidationPayload` (`src/reactivity/Payload.ts`) is a generic side channel
+- `InvalidationPayload` (`packages/reactivity/src/Payload.ts`) is a generic side channel
   next to `Reactivity`: `invalidateUnsafe(keys, payload)` runs the handlers
   with `current()` returning the payload (a JSON value). `DistributedReactivity`
   provides it, publishes the payload with the keys, and sets it while applying
@@ -697,7 +697,7 @@ A rename on server A is a single-row patch on server B, as it is on A: the
   one process knows whether it has open views, so with a cross-process
   `Reactivity` the previous version is always read (one SELECT per update).
 
-`test/crossprocess.test.ts` runs two apps on one SQLite file, with a users view
+`apps/demo/test/crossprocess.test.ts` runs two apps on one SQLite file, with a users view
 open on B only. Statements B runs per mutation on A:
 
 | Mutation on A                          | Before (bare keys) | After             |
@@ -716,7 +716,7 @@ key registered in that process (it tracks `registerUnsafe`, `query` and
 
 ### Shared views, and how many tabs it takes
 
-Identical live views share their work (`src/datastar/Shared.ts`): every tab
+Identical live views share their work (`packages/datastar/src/Shared.ts`): every tab
 showing the same table (same organization, embed lock and query) or the same
 record gets the events of one shared source, which runs the query and renders
 once per change. A tab starts from the source's snapshot (so joining a running
@@ -727,7 +727,7 @@ renders the same table sends nothing, one that only changes the total sends just
 the pagination, and a live record wakes only for its own row
 (`users[orgId=1]:42`) and its related tables.
 
-How far that goes is measured by a load harness (`scripts/load/`, `SEED=load`,
+How far that goes is measured by a load harness (`apps/demo/scripts/load/`, `SEED=load`,
 `METRICS=1` for `GET /_metrics`): one process holds 10,000 live streams with
 5 writes/s at a p50/p99 of 19/140 ms from a write's response to each tab's patch,
 about 37 KB of heap per stream. Results, scenarios (bursts, slow consumers, two
@@ -736,8 +736,8 @@ would come next: **[docs/load.md](docs/load.md)**.
 
 ## JSON API
 
-`src/crud/Api.ts` derives an Effect `HttpApiGroup` from an assembled resource
-(which carries the relation-aware conflict messages), and `src/app/Api.ts`
+`packages/crud/src/Api.ts` derives an Effect `HttpApiGroup` from an assembled resource
+(which carries the relation-aware conflict messages), and `apps/demo/src/app/Api.ts`
 mounts the users, teams and tags groups under `/api`, with the OpenAPI document at
 `/api/openapi.json` and a Scalar reference at `/api/docs`:
 
@@ -805,7 +805,7 @@ curl -b jar -X POST localhost:3000/api/users -H 'content-type: application/json'
 `GET /users?teamId=3&sort=name&dir=asc` renders that query on the server, so the
 first paint has the table. Each new live stream patches a local signal
 (`users._url`) with the canonical URL, which the page writes to the address
-bar (`src/crud/UrlState.ts`):
+bar (`packages/crud/src/UrlState.ts`):
 
 - **Filters, sort and page push history entries**, so Back and Forward step
   through list states.
