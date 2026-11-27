@@ -10,9 +10,9 @@
  *
  * Internal to the resource modules.
  */
-import * as ds from "@effect-datastar/datastar/Attrs.ts"
 import type { SignalPath } from "@effect-datastar/datastar/Attrs.ts"
 import * as Datastar from "@effect-datastar/datastar/Datastar.ts"
+import { Signals } from "@effect-datastar/datastar/Expr.ts"
 import { Cause, Effect, Schema, type Stream } from "effect"
 import type { HttpServerRequest } from "effect/http"
 import type { SqlError } from "effect/sql"
@@ -116,9 +116,9 @@ export const model = <
     columns: w.tableFields.filter((f) => f.key !== lockKey),
     /** Relations other than the lock: their selects get live options. */
     scopedRelations: w.relations.filter(([k]) => k !== lockKey),
-    signals: ds.make(Schema.Struct({ [ns]: Schema.Struct({ query: spec.query.schema, ...editorSchema, ...bulkSchema }) })),
+    signals: Signals.from(Schema.Struct({ [ns]: Schema.Struct({ query: spec.query.schema, ...editorSchema, ...bulkSchema }) })),
     /** Just the dialog's signals, for a page without the table (the detail page). */
-    editorSignals: ds.make(Schema.Struct({ [ns]: Schema.Struct(editorSchema) })),
+    editorSignals: Signals.from(Schema.Struct({ [ns]: Schema.Struct(editorSchema) })),
     path,
     $: (...parts: Array<string>) => `$${path(...parts)}`,
     /** The search params that pick this table and its lock on the shared routes. */

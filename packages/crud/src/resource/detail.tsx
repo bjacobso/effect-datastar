@@ -1,3 +1,4 @@
+/** @jsxImportSource @effect-datastar/ui */
 /**
  * The detail page (`GET /users/:id`): the row's fields with Edit and Delete,
  * then its sections (embeds of other resources' tables, or any rendering of
@@ -10,6 +11,7 @@ import * as stylex from "@stylexjs/stylex"
 import * as ds from "@effect-datastar/datastar/Attrs.ts"
 import * as Datastar from "@effect-datastar/datastar/Datastar.ts"
 import * as Endpoint from "@effect-datastar/datastar/Endpoint.ts"
+import { Action } from "@effect-datastar/datastar/Expr.ts"
 import * as Shared from "@effect-datastar/datastar/Shared.ts"
 import { Button } from "@effect-datastar/ui/Button.tsx"
 import { Alert, Card, EmptyState } from "@effect-datastar/ui/display.tsx"
@@ -71,7 +73,7 @@ export const make = <
               icon="trash"
               {...ds.on(
                 "click",
-                `confirm(${JSON.stringify(`Delete ${w.label(row)}?`)}) && ${remove.call({ id }, { search: { [FROM]: "detail" } })}`
+                Action.confirm(`Delete ${w.label(row)}?`, remove.call({ id }, { search: { [FROM]: "detail" } })).toExpr()
               )}
             >
               Delete
@@ -220,7 +222,7 @@ export const make = <
                   {w.title}
                 </a>
               </p>
-              <div id={`${name}-record-live`} {...ds.init(record.call({ id: String(id.value) }))}>
+              <div id={`${name}-record-live`} $init={record.call({ id: String(id.value) })}>
                 <RecordView row={row} lookups={lookups} />
               </div>
               {extra.map((section, i) => <Fragment key={i}>{section}</Fragment>)}

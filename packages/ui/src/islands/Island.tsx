@@ -35,6 +35,7 @@
 import * as stylex from "@stylexjs/stylex"
 import type { DetailedHTMLProps, HTMLAttributes, ReactNode } from "react"
 import type { Attrs } from "@effect-datastar/datastar/Attrs.ts"
+import { type DatastarProps, transformProps } from "../jsx-runtime.ts"
 import { type Host, TAG } from "./host.ts"
 
 export { type Host, TAG }
@@ -70,9 +71,19 @@ declare module "react" {
 
 /**
  * Server side: an island's host, with the component rendered as its placeholder.
- * `attrs` are Datastar attributes for the host (`ds.bind(...)`, `ds.attr(...)`, ...).
+ * Accepts `$`-prefixed Datastar props (`$bind`, `$attr`, `$on`, ...) as well as
+ * legacy `attrs` (`ds.bind(...)`, `ds.attr(...)`, ...).
  */
-export function Mount<P>(props: {
+export function Mount<P>({
+  island,
+  props: islandProps,
+  id,
+  attrs,
+  value,
+  content,
+  display,
+  ...dsProps
+}: {
   readonly island: Island<P>
   readonly props: P
   readonly id?: string | undefined
@@ -82,21 +93,21 @@ export function Mount<P>(props: {
   /** Server-rendered content the island places itself (`host.content`). */
   readonly content?: ReactNode
   readonly display?: "block" | "contents"
-}) {
-  const { island } = props
-  const attrs = props.attrs ?? {}
+} & DatastarProps) {
+  const compiled = transformProps(TAG, dsProps) as Attrs
+  const hostAttrs: Attrs = attrs ? { ...attrs, ...compiled } : compiled
   return (
     <ds-island
       name={island.name}
-      props={JSON.stringify(props.props)}
-      id={props.id}
-      {...attrs}
-      {...stylex.props(props.display === "contents" ? styles.contents : styles.block)}
+      props={JSON.stringify(islandProps)}
+      id={id}
+      {...hostAttrs}
+      {...stylex.props(display === "contents" ? styles.contents : styles.block)}
     >
       <div data-island-root="" data-ignore-morph="">
-        <island.Component props={props.props} host={staticHost(props.value ?? "", attrs)} />
+        <island.Component props={islandProps} host={staticHost(value ?? "", hostAttrs)} />
       </div>
-      {props.content !== undefined && <div data-island-content="" data-ignore-morph="" hidden>{props.content}</div>}
+      {content !== undefined && <div data-island-content="" data-ignore-morph="" hidden>{content}</div>}
     </ds-island>
   )
 }

@@ -1,3 +1,4 @@
+/** @jsxImportSource @effect-datastar/ui */
 /**
  * Generic, schema-driven CRUD components (pure: props -> React elements, rendered to
  * HTML on the server).
@@ -7,10 +8,11 @@
  * tokens; no client JS except the islands (the relation select and the dialog).
  */
 import * as stylex from "@stylexjs/stylex"
-import { DateTime } from "effect"
+import { DateTime, Schema } from "effect"
 import type { ReactNode } from "react"
 import * as ds from "@effect-datastar/datastar/Attrs.ts"
 import type { SignalPath } from "@effect-datastar/datastar/Attrs.ts"
+import { Action, type ActionLike, raw, type Signal, Signals } from "@effect-datastar/datastar/Expr.ts"
 import * as Island from "@effect-datastar/ui/islands/Island.tsx"
 import { DateInput, Dialog, MultiSelect, MultiSelectValue, Select } from "@effect-datastar/ui/islands/islands.tsx"
 import { Button } from "@effect-datastar/ui/Button.tsx"
@@ -26,8 +28,21 @@ import { type FilterInfo, NULL, rangeKeys } from "./Query.ts"
 import * as UrlState from "./UrlState.ts"
 
 const at = (base: SignalPath, ...rest: Array<string>) => [base, ...rest].join(".") as SignalPath
-const ref = (path: SignalPath) => `$${path}`
-const str = (s: string) => `'${s.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
+
+const stringSignal = (path: SignalPath): Signal<string> =>
+  (Signals.from(Schema.Struct({ [path]: Schema.String })) as Record<string, Signal<string>>)[path]!
+
+const numberSignal = (path: SignalPath): Signal<number> =>
+  (Signals.from(Schema.Struct({ [path]: Schema.Number })) as Record<string, Signal<number>>)[path]!
+
+const booleanSignal = (path: SignalPath): Signal<boolean> =>
+  (Signals.from(Schema.Struct({ [path]: Schema.Boolean })) as Record<string, Signal<boolean>>)[path]!
+
+const arraySignal = (path: SignalPath): Signal<ReadonlyArray<unknown>> =>
+  (Signals.from(Schema.Struct({ [path]: Schema.Array(Schema.Unknown) })) as Record<string, Signal<ReadonlyArray<unknown>>>)[path]!
+
+const unknownSignal = (path: SignalPath): Signal<unknown> =>
+  (Signals.from(Schema.Struct({ [path]: Schema.Unknown })) as Record<string, Signal<unknown>>)[path]!
 
 /**
  * Options for a field: from a lookup (relations) when given, otherwise derived
@@ -59,7 +74,8 @@ export const FilterSelect = (props: {
   return (
     <select
       id={filterId(props.prefix, f.key)}
-      {...ds.merge(ds.bind(at(props.query, "filters", f.key)), ds.on("change", `${ref(at(props.query, "page"))} = 1`))}
+      $bind={at(props.query, "filters", f.key)}
+      $on={{ change: numberSignal(at(props.query, "page")).set(1) }}
       {...stylex.props(shared.control, styles.select)}
     >
       <option value="">All</option>
@@ -74,36 +90,40 @@ export const FilterBar = (props: {
   readonly filters: ReadonlyArray<FilterInfo>
   readonly query: SignalPath
   readonly lookups?: Lookups | undefined
-}) => (
-  <div {...stylex.props(styles.filters)}>
-    {props.filters.map((f) =>
-      f.operator === "range"
-        ? <RangeFilter key={f.key} prefix={props.prefix} filter={f} query={props.query} />
-        : (
-      <label key={f.key} {...stylex.props(styles.filter)}>
-        <span {...stylex.props(styles.filterLabel)}>{f.label}</span>
-        {f.operator === "contains"
-          ? (
-            <span {...stylex.props(styles.search)}>
-              <Icon name="search" size={14} {...stylex.props(styles.searchIcon)} />
-              <input
-                type="search"
-                placeholder={`Search ${f.label.toLowerCase()}…`}
-                {...ds.merge(
-                  ds.bind(at(props.query, "filters", f.key)),
-                  ds.on("input", `${ref(at(props.query, "page"))} = 1; ${UrlState.typing(props.prefix).input}`),
-                  ds.on("blur", UrlState.typing(props.prefix).blur)
-                )}
-                {...stylex.props(shared.control, styles.searchInput)}
-              />
-            </span>
+}) => {
+  const page = numberSignal(at(props.query, "page"))
+  const typing = UrlState.typing(props.prefix)
+  return (
+    <div {...stylex.props(styles.filters)}>
+      {props.filters.map((f) =>
+        f.operator === "range"
+          ? <RangeFilter key={f.key} prefix={props.prefix} filter={f} query={props.query} />
+          : (
+        <label key={f.key} {...stylex.props(styles.filter)}>
+          <span {...stylex.props(styles.filterLabel)}>{f.label}</span>
+          {f.operator === "contains"
+            ? (
+              <span {...stylex.props(styles.search)}>
+                <Icon name="search" size={14} {...stylex.props(styles.searchIcon)} />
+                <input
+                  type="search"
+                  placeholder={`Search ${f.label.toLowerCase()}…`}
+                  $bind={at(props.query, "filters", f.key)}
+                  $on={{
+                    input: Action.seq(page.set(1), typing.input),
+                    blur: typing.blur
+                  }}
+                  {...stylex.props(shared.control, styles.searchInput)}
+                />
+              </span>
+            )
+            : <FilterSelect prefix={props.prefix} filter={f} query={props.query} lookup={props.lookups?.[f.key]} />}
+        </label>
           )
-          : <FilterSelect prefix={props.prefix} filter={f} query={props.query} lookup={props.lookups?.[f.key]} />}
-      </label>
-        )
-    )}
-  </div>
-)
+      )}
+    </div>
+  )
+}
 
 /**
  * A date range filter: two date picker islands bound to `filters.${key}From` and
@@ -112,7 +132,7 @@ export const FilterBar = (props: {
 export const RangeFilter = (props: { readonly prefix: string; readonly filter: FilterInfo; readonly query: SignalPath }) => {
   const f = props.filter
   const [from, to] = rangeKeys(f.key)
-  const resetPage = ds.on("change", `${ref(at(props.query, "page"))} = 1`)
+  const resetPage = numberSignal(at(props.query, "page")).set(1)
   return (
     <div role="group" aria-label={f.label} {...stylex.props(styles.filter, styles.range)}>
       <span {...stylex.props(styles.filterLabel)}>{f.label}</span>
@@ -121,13 +141,15 @@ export const RangeFilter = (props: { readonly prefix: string; readonly filter: F
           island={DateInput}
           id={filterId(props.prefix, from)}
           props={{ label: `${f.label} from`, placeholder: "From" }}
-          attrs={ds.merge(ds.bind(at(props.query, "filters", from)), resetPage)}
+          $bind={at(props.query, "filters", from)}
+          $on={{ change: resetPage }}
         />
         <Island.Mount
           island={DateInput}
           id={filterId(props.prefix, to)}
           props={{ label: `${f.label} to`, placeholder: "To" }}
-          attrs={ds.merge(ds.bind(at(props.query, "filters", to)), resetPage)}
+          $bind={at(props.query, "filters", to)}
+          $on={{ change: resetPage }}
         />
       </span>
     </div>
@@ -207,9 +229,8 @@ export const SortHeader = (props: {
   readonly query: SignalPath
   readonly current: { readonly sort: string; readonly dir: "asc" | "desc" }
 }) => {
-  const sort = ref(at(props.query, "sort"))
-  const dir = ref(at(props.query, "dir"))
-  const key = str(props.field.key)
+  const sort = stringSignal(at(props.query, "sort"))
+  const dir = stringSignal(at(props.query, "dir"))
   const active = props.current.sort === props.field.key
   return (
     <th
@@ -218,10 +239,11 @@ export const SortHeader = (props: {
     >
       <button
         type="button"
-        {...ds.on(
-          "click",
-          `${sort} === ${key} ? ${dir} = (${dir} === 'asc' ? 'desc' : 'asc') : (${sort} = ${key}, ${dir} = 'asc')`
-        )}
+        $on={{
+          click: Action.raw(
+            `if (${sort.eq(props.field.key).toExpr()}) { ${dir.set(dir.eq("asc").ternary("desc", "asc")).toExpr()} } else { ${Action.seq(sort.set(props.field.key), dir.set("asc")).toExpr()} }`
+          )
+        }}
         {...stylex.props(styles.sort, shared.focusRing, active && styles.sortActive)}
       >
         {props.field.label}
@@ -316,10 +338,10 @@ export const Table = <A extends object>(props: {
 )
 
 /** A row's Edit / Delete buttons. */
-export const RowActions = (props: { readonly edit: ds.Expr; readonly remove: ds.Expr }) => (
+export const RowActions = (props: { readonly edit: ActionLike | string; readonly remove: ActionLike | string }) => (
   <span {...stylex.props(styles.rowActions)}>
-    <Button variant="ghost" size="sm" icon="edit" {...ds.on("click", props.edit)}>Edit</Button>
-    <Button variant="ghost" size="sm" icon="trash" xstyle={styles.dangerText} {...ds.on("click", props.remove)}>
+    <Button variant="ghost" size="sm" icon="edit" {...ds.on("click", Action.raw(props.edit).toExpr())}>Edit</Button>
+    <Button variant="ghost" size="sm" icon="trash" xstyle={styles.dangerText} {...ds.on("click", Action.raw(props.remove).toExpr())}>
       Delete
     </Button>
   </span>
@@ -345,15 +367,14 @@ export const Pagination = (props: {
   readonly total: number
   readonly pageSizes: ReadonlyArray<number>
 }) => {
-  const page = ref(at(props.query, "page"))
-  const go = (n: number) => ds.on("click", `${page} = ${n}`)
+  const page = numberSignal(at(props.query, "page"))
   const PageButton = (p: { readonly to: number; readonly disabled: boolean; readonly label: string; readonly icon: "chevronsLeft" | "chevronLeft" | "chevronRight" | "chevronsRight" }) => (
     <button
       type="button"
       aria-label={p.label}
       title={p.label}
       disabled={p.disabled}
-      {...go(p.to)}
+      $on={{ click: page.set(p.to) }}
       {...stylex.props(styles.pageButton, shared.focusRing)}
     >
       <Icon name={p.icon} size={15} />
@@ -372,7 +393,8 @@ export const Pagination = (props: {
       <label {...stylex.props(styles.perPage)}>
         Per page
         <select
-          {...ds.merge(ds.bind(at(props.query, "pageSize")), ds.on("change", `${page} = 1`))}
+          $bind={at(props.query, "pageSize")}
+          $on={{ change: page.set(1) }}
           {...stylex.props(shared.control, styles.select, styles.perPageSelect)}
         >
           {props.pageSizes.map((n) => <option key={n} value={String(n)}>{n}</option>)}
@@ -394,8 +416,8 @@ interface FieldProps {
   readonly lookup?: ReadonlyArray<Option> | undefined
 }
 
-const invalidAttr = (props: FieldProps) =>
-  ds.attr("aria-invalid", `${ref(at(props.errors, props.field.key))} ? 'true' : 'false'`)
+const invalidExpr = (props: FieldProps) =>
+  raw<string>(`${stringSignal(at(props.errors, props.field.key)).toExpr()} ? 'true' : 'false'`)
 
 /**
  * A select field: a ui-sdk Select island bound to the draft, for relations (options
@@ -405,8 +427,10 @@ const invalidAttr = (props: FieldProps) =>
  */
 export const FieldSelect = (props: FieldProps) => {
   const id = fieldId(props.prefix, props.field.key)
-  const attrs = ds.merge(ds.bind(at(props.draft, props.field.key)), invalidAttr(props))
+  const fieldPath = at(props.draft, props.field.key)
+  const invalid = invalidExpr(props)
   if (props.field.kind === "ids") {
+    const ids = arraySignal(fieldPath)
     return (
       <Island.Mount
         island={MultiSelect}
@@ -419,11 +443,11 @@ export const FieldSelect = (props: FieldProps) => {
         }}
         // Not `data-bind`: Datastar binds an array signal as one checkbox per element
         // (`tags.0`, `tags.1`, ...). The value goes in as JSON and comes back on `change`.
-        attrs={ds.merge(
-          ds.attr(MultiSelectValue, `JSON.stringify(${ref(at(props.draft, props.field.key))})`),
-          ds.on("change", `${ref(at(props.draft, props.field.key))} = [...evt.target.value]`),
-          invalidAttr(props)
-        )}
+        $attr={{
+          [MultiSelectValue]: raw<string>(`JSON.stringify(${ids.toExpr()})`),
+          "aria-invalid": invalid
+        }}
+        $on={{ change: ids.set(raw<ReadonlyArray<unknown>>("[...evt.target.value]")) }}
       />
     )
   }
@@ -436,14 +460,15 @@ export const FieldSelect = (props: FieldProps) => {
         label: props.field.label,
         emptyLabel: props.field.nullable ? `No ${props.field.label.toLowerCase()}` : undefined
       }}
-      attrs={attrs}
+      $bind={fieldPath}
+      $attr={{ "aria-invalid": invalid }}
     />
   )
 }
 
 /** Shows the field's server-side error (from the `errors` signals). */
 const FieldError = (props: { readonly error: SignalPath }) => (
-  <small aria-live="polite" {...ds.text(ref(props.error))} {...stylex.props(form.error, styles.fieldError)} />
+  <small aria-live="polite" $text={stringSignal(props.error)} {...stylex.props(form.error, styles.fieldError)} />
 )
 
 /** Widgets that are islands: no labelable element, so they are named by `aria-label`. */
@@ -463,18 +488,18 @@ const islandWidgets: ReadonlyArray<Field.FieldInfo["widget"]> = ["select", "mult
 export const FormField = (props: FieldProps) => {
   const f = props.field
   const id = fieldId(props.prefix, f.key)
-  const bind = ds.bind(at(props.draft, f.key))
-  const bound = ds.merge(bind, invalidAttr(props))
+  const fieldPath = at(props.draft, f.key)
+  const invalid = invalidExpr(props)
   const error = at(props.errors, f.key)
   if (f.widget === "checkbox" || f.widget === "switch") {
     const isSwitch = f.widget === "switch"
     return (
       <div {...stylex.props(form.field)}>
         <label {...stylex.props(isSwitch ? form.switchRow : form.check)}>
-          {!isSwitch && <input id={id} type="checkbox" {...bind} {...stylex.props(form.checkbox, shared.focusRing)} />}
+          {!isSwitch && <input id={id} type="checkbox" $bind={fieldPath} {...stylex.props(form.checkbox, shared.focusRing)} />}
           <span {...stylex.props(form.label)}>{f.label}</span>
           {isSwitch && (
-            <input id={id} type="checkbox" role="switch" {...bind} {...stylex.props(form.switch, shared.focusRing)} />
+            <input id={id} type="checkbox" role="switch" $bind={fieldPath} {...stylex.props(form.switch, shared.focusRing)} />
           )}
         </label>
         <FieldError error={error} />
@@ -487,15 +512,23 @@ export const FormField = (props: FieldProps) => {
       case "multiselect":
         return <FieldSelect {...props} />
       case "date":
-        return <Island.Mount island={DateInput} id={id} props={{ label: f.label, placeholder: "No date" }} attrs={bound} />
+        return (
+          <Island.Mount
+            island={DateInput}
+            id={id}
+            props={{ label: f.label, placeholder: "No date" }}
+            $bind={fieldPath}
+            $attr={{ "aria-invalid": invalid }}
+          />
+        )
       case "textarea":
-        return <TextArea id={id} rows={3} {...bound} />
+        return <TextArea id={id} rows={3} {...ds.merge(ds.bind(fieldPath), ds.attr("aria-invalid", invalid.toExpr()))} />
       case "color":
-        return <input id={id} type="color" {...bound} {...stylex.props(shared.control, styles.color)} />
+        return <input id={id} type="color" $bind={fieldPath} $attr={{ "aria-invalid": invalid }} {...stylex.props(shared.control, styles.color)} />
       case "readonly":
-        return <input id={id} disabled {...bind} {...stylex.props(shared.control)} />
+        return <input id={id} disabled $bind={fieldPath} {...stylex.props(shared.control)} />
       default:
-        return <input id={id} type={f.widget} {...bound} {...stylex.props(shared.control)} />
+        return <input id={id} type={f.widget} $bind={fieldPath} $attr={{ "aria-invalid": invalid }} {...stylex.props(shared.control)} />
     }
   })()
   const Wrapper = islandWidgets.includes(f.widget) ? "div" : "label"
@@ -524,23 +557,25 @@ export const FormDialog = (props: {
   readonly draft: SignalPath
   readonly errors: SignalPath
   readonly open: SignalPath
-  readonly submit: ds.Expr
+  readonly submit: ActionLike | string
   readonly lookups?: Lookups | undefined
 }) => {
-  const open = ref(props.open)
+  const open = booleanSignal(props.open)
+  const draftId = unknownSignal(at(props.draft, "id"))
   const titleId = `${props.prefix}-dialog-title`
   return (
     <Island.Mount
       island={Dialog}
       id={`${props.prefix}-dialog`}
       props={{ labelledBy: titleId }}
-      attrs={ds.merge(ds.attr("open", open), ds.on("close", `${open} = false`))}
+      $attr={{ open }}
+      $on={{ close: open.set(false) }}
       display="contents"
       content={
-        <form noValidate {...ds.on("submit", props.submit, { prevent: true })} {...stylex.props(styles.form)}>
+        <form noValidate $on={{ submit: { run: props.submit, prevent: true } }} {...stylex.props(styles.form)}>
           <h2
             id={titleId}
-            {...ds.text(`${ref(at(props.draft, "id"))} ? ${str(`Edit ${props.noun}`)} : ${str(`New ${props.noun}`)}`)}
+            $text={draftId.isNotNull().and(draftId.neq("")).ternary(`Edit ${props.noun}`, `New ${props.noun}`)}
             {...stylex.props(overlay.dialogTitle)}
           />
           {props.fields.map((field) => (
@@ -554,7 +589,7 @@ export const FormDialog = (props: {
             />
           ))}
           <footer {...stylex.props(styles.dialogActions)}>
-            <Button variant="ghost" {...ds.on("click", `${open} = false`)}>Cancel</Button>
+            <Button variant="ghost" {...ds.on("click", open.set(false).toExpr())}>Cancel</Button>
             <Button type="submit" variant="primary">Save</Button>
           </footer>
         </form>
