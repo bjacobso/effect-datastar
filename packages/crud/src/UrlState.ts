@@ -26,29 +26,54 @@
  *
  * Only one table per page owns the URL (the list page's); embeds don't.
  */
-import * as ds from "@effect-datastar/datastar/Attrs.ts"
+import { Schema } from "effect"
+import { Action, type ActionLike, raw, Signals } from "@effect-datastar/datastar/Expr.ts"
+
+const urlSignals = (ns: string) =>
+  Signals.from(
+    Schema.Struct({
+      _url: Schema.String,
+      _nav: Schema.String,
+      _typing: Schema.Boolean,
+      _pushed: Schema.Boolean
+    }),
+    ns
+  )
 
 /** The local signals the effect uses, with their initial values. `url` is the page's canonical URL. */
 export const initial = (url: string) => ({ _url: url, _nav: "replace", _typing: false, _pushed: false })
 
-/** For the table's section: keeps the address bar in step with `_url`, and restores the query on Back/Forward. */
-export const attrs = (ns: string, restore: ds.Expr): ds.Attrs => {
-  const $ = (name: string) => `$${ns}.${name}`
-  const here = "location.pathname + location.search"
-  return ds.merge(
-    ds.effect(
-      `${$("_url")} && ${$("_url")} !== ${here} && (` +
-        `${$("_nav")} === 'replace' || (${$("_typing")} && ${$("_pushed")})` +
-        ` ? history.replaceState(history.state, '', ${$("_url")})` +
-        ` : (history.pushState(null, '', ${$("_url")}), ${$("_pushed")} = ${$("_typing")})` +
-        `); ${$("_nav")} = 'push'`
+/** Effect for the table's section: keeps the address bar in step with `_url`. */
+export const effect = (ns: string): Action => {
+  const $ = urlSignals(ns)
+  const here = raw<string>("location.pathname + location.search")
+  const replace = Action.raw(`history.replaceState(history.state, '', ${$._url.toExpr()})`)
+  const push = Action.seq(
+    Action.raw(`history.pushState(null, '', ${$._url.toExpr()})`),
+    $._pushed.set($._typing)
+  )
+  return Action.seq(
+    Action.when(
+      $._url.isNotNull().and($._url.neq("")).and($._url.neq(here)),
+      Action.raw(
+        `if (${$._nav.eq("replace").or($._typing.and($._pushed)).toExpr()}) { ${replace.toExpr()} } else { ${push.toExpr()} }`
+      )
     ),
-    ds.on("popstate", `${$("_typing")} = false; ${$("_pushed")} = false; ${restore}`, { window: true })
+    $._nav.set("push")
   )
 }
 
+/** Handler for `window` `popstate`: clears typing flags and restores the query from the URL. */
+export const popstate = (ns: string, restore: ActionLike | string): Action => {
+  const $ = urlSignals(ns)
+  return Action.seq($._typing.set(false), $._pushed.set(false), restore)
+}
+
 /** For a text filter: typing replaces the entry its first change pushed, until the field loses focus. */
-export const typing = (ns: string) => ({
-  input: `$${ns}._typing = true`,
-  blur: `$${ns}._typing = false; $${ns}._pushed = false`
-})
+export const typing = (ns: string): { readonly input: Action; readonly blur: Action } => {
+  const $ = urlSignals(ns)
+  return {
+    input: $._typing.set(true),
+    blur: Action.seq($._typing.set(false), $._pushed.set(false))
+  }
+}

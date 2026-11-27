@@ -1,8 +1,10 @@
+/** @jsxImportSource @effect-datastar/ui */
 import * as stylex from "@stylexjs/stylex"
 import { Effect } from "effect"
 import type { ReactNode } from "react"
 import { CurrentOrg, CurrentUser } from "../auth/Auth.ts"
 import * as ds from "@effect-datastar/datastar/Attrs.ts"
+import { Action } from "@effect-datastar/datastar/Expr.ts"
 import * as Island from "@effect-datastar/ui/islands/Island.tsx"
 import { Theme } from "@effect-datastar/ui/islands/islands.tsx"
 import { Button } from "@effect-datastar/ui/Button.tsx"
@@ -11,6 +13,7 @@ import { themeScript } from "@effect-datastar/ui/theme/themes.ts"
 import { color, font, radius, size, space } from "@effect-datastar/ui/theme/tokens.stylex.ts"
 
 const links = [["/users", "Users"], ["/teams", "Teams"], ["/tags", "Tags"]] as const
+const signOut = Action.raw("@post('/logout')")
 
 interface ShellProps {
   readonly title: string
@@ -72,7 +75,7 @@ export const Shell = (props: ShellProps) => (
                 <span id="account-name" {...stylex.props(styles.name)}>{props.account.name}</span>
                 <span id="account-org" {...stylex.props(styles.org)}>{props.account.org}</span>
               </span>
-              <Button size="sm" icon="logout" {...ds.on("click", "@post('/logout')")}>Sign out</Button>
+              <Button size="sm" icon="logout" {...ds.on("click", signOut.toExpr())}>Sign out</Button>
             </div>
           )}
           <Island.Mount island={Theme} props={{}} />

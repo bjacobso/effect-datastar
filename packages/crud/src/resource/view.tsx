@@ -1,3 +1,4 @@
+/** @jsxImportSource @effect-datastar/ui */
 /**
  * A table, rendered: the section with its filters, live table, paging and
  * create/edit dialog (`View`), the dialog alone (`Editor`, for the detail
@@ -10,10 +11,11 @@ import * as stylex from "@stylexjs/stylex"
 import * as ds from "@effect-datastar/datastar/Attrs.ts"
 import * as Datastar from "@effect-datastar/datastar/Datastar.ts"
 import * as Endpoint from "@effect-datastar/datastar/Endpoint.ts"
+import { Action, type Signal, Signals } from "@effect-datastar/datastar/Expr.ts"
 import { Button } from "@effect-datastar/ui/Button.tsx"
 import { Skeleton } from "@effect-datastar/ui/display.tsx"
 import { render } from "@effect-datastar/ui/Html.ts"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import * as Bulk from "../Bulk.tsx"
 import * as Components from "../components.tsx"
 import type * as Query from "../Query.ts"
@@ -94,7 +96,7 @@ export const make = <
     return (
       <Components.RowActions
         edit={edit.call({ id }, { search: search(lock) })}
-        remove={`confirm(${JSON.stringify(`Delete ${w.label(row)}?`)}) && ${remove.call({ id }, { search: search(lock) })}`}
+        remove={Action.confirm(`Delete ${w.label(row)}?`, remove.call({ id }, { search: search(lock) }))}
       />
     )
   }
@@ -159,21 +161,39 @@ export const make = <
     </Components.TablePanel>
   )
 
-  /** The create/edit dialog (create when `draft.id` is blank). */
-  const Dialog = (props: { readonly lock: Lock; readonly lookups?: Components.Lookups | undefined }) => (
-    <Components.FormDialog
-      prefix={ns}
-      noun={w.noun}
-      fields={t.fields}
-      draft={path("draft")}
-      errors={path("errors")}
-      open={path("dialog")}
-      submit={`${t.$("draft", "id")} ? ${
-        update.call({ id: Endpoint.js(t.$("draft", "id")) }, { include: [path("draft")], search: search(props.lock) })
-      } : ${create.call(undefined, { include: [path("draft")], search: search(props.lock) })}`}
-      lookups={props.lookups}
-    />
+  const editorSig = Signals.from(
+    Schema.Struct({
+      draft: Schema.Struct({ id: Schema.Unknown }),
+      errors: Schema.Unknown,
+      dialog: Schema.Boolean
+    }),
+    ns
   )
+  const draftSig = editorSig.draft as unknown as Signal<unknown>
+  const draftIdSig = editorSig.draft.id
+
+  /** The create/edit dialog (create when `draft.id` is blank). */
+  const Dialog = (props: { readonly lock: Lock; readonly lookups?: Components.Lookups | undefined }) => {
+    const updateCall = update.call(
+      { id: Endpoint.js(draftIdSig) },
+      { include: [path("draft")], search: search(props.lock) }
+    )
+    const createCall = create.call(undefined, { include: [path("draft")], search: search(props.lock) })
+    return (
+      <Components.FormDialog
+        prefix={ns}
+        noun={w.noun}
+        fields={t.fields}
+        draft={path("draft")}
+        errors={path("errors")}
+        open={path("dialog")}
+        submit={Action.raw(
+          `if (${draftIdSig.isNotNull().and(draftIdSig.neq("")).toExpr()}) { ${updateCall} } else { ${createCall} }`
+        )}
+        lookups={props.lookups}
+      />
+    )
+  }
 
   interface Initial {
     readonly page: Repo.Page<Row>
@@ -187,50 +207,52 @@ export const make = <
    */
   const View = (props: { readonly query: Q; readonly lock: Lock; readonly initial?: Initial | undefined }) => {
     const liveCall = view.call(undefined, { include: [path("query")], search: search(props.lock) })
+    const openCreate = Action.seq(
+      draftSig.set(t.blankDraft),
+      editorSig.errors.set(t.noErrors),
+      editorSig.dialog.set(true)
+    )
     return (
       <section
         id={`${ns}-section`}
         {...stylex.props(styles.section)}
-        {...ds.merge(
-          t.signals.init({
-            [ns]: {
-              query: props.query,
-              draft: t.blankDraft,
-              errors: t.noErrors,
-              dialog: false,
-              selection: [],
-              bulk: { field: "", value: "" },
-              _page: props.initial ? w.pageIds(props.initial.page.rows) : [],
-              ...(spec.syncUrl ? UrlState.initial(t.urlFor(spec.full(props.query, props.lock))) : {})
+        $signals={t.signals.init({
+          [ns]: {
+            query: props.query,
+            draft: t.blankDraft,
+            errors: t.noErrors,
+            dialog: false,
+            selection: [],
+            bulk: { field: "", value: "" },
+            _page: props.initial ? w.pageIds(props.initial.page.rows) : [],
+            ...(spec.syncUrl ? UrlState.initial(t.urlFor(spec.full(props.query, props.lock))) : {})
+          }
+        })}
+        $effect={spec.syncUrl ? UrlState.effect(ns) : undefined}
+        $on={spec.syncUrl
+          ? {
+            popstate: {
+              run: UrlState.popstate(ns, restore.call(undefined, { include: [], searchExpr: "location.search" })),
+              window: true
             }
-          }),
-          spec.syncUrl && UrlState.attrs(ns, restore.call(undefined, { include: [], searchExpr: "location.search" }))
-        )}
+          }
+          : undefined}
       >
         <header {...stylex.props(styles.bar)}>
           {spec.heading === "h1"
             ? <h1 {...stylex.props(styles.h1)}>{spec.title}</h1>
             : <h2 {...stylex.props(styles.h2)}>{spec.title}</h2>}
-          <Button
-            variant="primary"
-            icon="plus"
-            {...ds.on(
-              "click",
-              `${t.$("draft")} = ${JSON.stringify(t.blankDraft)}; ${t.$("errors")} = ${JSON.stringify(t.noErrors)}; ${t.$("dialog")} = true`
-            )}
-          >
+          <Button variant="primary" icon="plus" {...ds.on("click", openCreate.toExpr())}>
             {`New ${w.noun}`}
           </Button>
         </header>
         <Components.FilterBar prefix={ns} filters={spec.query.filters} query={path("query")} lookups={props.initial?.lookups} />
         <div
           id={`${ns}-live`}
-          {...ds.merge(
-            ds.init(liveCall),
-            ds.onSignalPatch(liveCall, { include: [path("query")], debounce: "200ms" }),
-            // Here, not on the section: an element has one `data-effect`, and the section's keeps the URL.
-            ds.effect(Bulk.prune(bulkPaths))
-          )}
+          $init={liveCall}
+          $onSignalPatch={{ run: liveCall, include: [path("query")], debounce: "200ms" }}
+          // Here, not on the section: an element has one `data-effect`, and the section's keeps the URL.
+          $effect={Bulk.prune(bulkPaths)}
         >
           {props.initial
             ? <TableView page={props.initial.page} current={props.query} lookups={props.initial.lookups} lock={props.lock} />
@@ -249,7 +271,7 @@ export const make = <
 
   /** Just the edit dialog and its signals, for a page without the table (the detail page). */
   const Editor = (props: { readonly lookups: Components.Lookups }) => (
-    <div {...t.editorSignals.init({ [ns]: { draft: t.blankDraft, errors: t.noErrors, dialog: false } })}>
+    <div $signals={t.editorSignals.init({ [ns]: { draft: t.blankDraft, errors: t.noErrors, dialog: false } })}>
       <Dialog lock={undefined} lookups={props.lookups} />
     </div>
   )
