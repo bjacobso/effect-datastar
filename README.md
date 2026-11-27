@@ -10,7 +10,8 @@ npm run dev:board  # live Kanban board example (4-layer Datastar DSL): http://lo
 npm run build:board # production build of apps/board
 npm run typecheck  # typecheck root + all workspaces
 npm test           # unit + HTTP + package boundary tests (in-process, in-memory SQLite)
-npm run test:e2e   # browser tests (builds demo once, real server + Playwright Chromium)
+npm run test:e2e   # demo browser tests (builds demo once, real server + Playwright Chromium)
+npm run test:e2e:board # board browser tests (builds board once, real server + Playwright Chromium)
 npm run load -- --streams 1000 --rate 5   # load test of live views (after npm run build), see docs/load.md
 ```
 

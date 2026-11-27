@@ -16,7 +16,8 @@
     "load": "npm run load -w @effect-datastar/demo --",
     "typecheck": "tsc --noEmit -p . && npm run typecheck --workspaces --if-present",
     "test": "vitest run",
-    "test:e2e": "npm run test:e2e -w @effect-datastar/demo"
+    "test:e2e": "npm run test:e2e -w @effect-datastar/demo",
+    "test:e2e:board": "npm run test:e2e -w @effect-datastar/board"
   },
   "devDependencies": {
     "@effect/vitest": "^4.1.5",
